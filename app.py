@@ -1,6 +1,6 @@
 import streamlit as st
 import firebase_admin
-from firebase_admin import credentials, db, auth # Import auth for user management (optional for this simple example)
+from firebase_admin import credentials, db, auth
 from datetime import date
 import uuid
 import pandas as pd
@@ -9,7 +9,7 @@ import time
 import streamlit.components.v1 as components
 
 # --- CONFIGURATION (using Streamlit Secrets) ---
-DB_PATH_ROOT = "users" # New root path for user-specific data
+DB_PATH_ROOT = "users"
 
 # --- AUDIO ASSETS (URLs) ---
 POMODORO_FINISH_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
@@ -18,7 +18,6 @@ WHITE_NOISE_URL = "https://www.soundjay.com/nature/sounds/whitenoise-1.mp3"
 
 
 # --- FIREBASE ADMIN SDK INITIALIZATION (For server-side operations if needed) ---
-# @st.cache_resource ensures this function runs only once across reruns.
 @st.cache_resource(show_spinner="Initializing Firebase Admin SDK...")
 def initialize_firebase_admin_sdk():
     firebase_config = st.secrets.get("firebase")
@@ -87,8 +86,6 @@ if "auth_status" not in st.session_state:
     st.session_state.auth_status = "pending" # pending, logged_in, logged_out
 
 # --- Streamlit Components for Authentication (using custom HTML/JS) ---
-# This component handles the actual Firebase client-side authentication flow.
-# It now *returns* a value to Streamlit
 def firebase_auth_component():
     html_code = f"""
     <!DOCTYPE html>
@@ -98,30 +95,39 @@ def firebase_auth_component():
         <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
         <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
         <script>
+            // Your Firebase project configuration
             const firebaseConfig = {FIREBASE_CLIENT_CONFIG};
-            if (!firebase.apps.length) {{ firebase.initializeApp(firebaseConfig); }} else {{ firebase.app(); }}
+
+            // Initialize Firebase
+            if (!firebase.apps.length) {{
+                firebase.initializeApp(firebaseConfig);
+            }} else {{
+                firebase.app(); // if already initialized, use that app
+            }}
 
             const auth = firebase.auth();
             const provider = new firebase.auth.GoogleAuthProvider();
 
             // Function to send data back to Streamlit
             function sendToStreamlit(type, data) {{
-                window.parent.postMessage({{
-                    streamlit: {{
-                        eventType: 'streamlit:componentReady',
-                        data: {{ type: type, data: data }}
-                    }}
-                }}, '*');
+                // Use Streamlit.setComponentValue to send data back.
+                // This is the correct way for components to communicate with Python.
+                if (window.streamlit && window.streamlit.setComponentValue) {{
+                    window.streamlit.setComponentValue({{ type: type, data: data }});
+                }}
             }}
 
             auth.onAuthStateChanged(user => {{
                 if (user) {{
-                    sendToStreamlit('auth_success', {{
+                    // User is signed in.
+                    const userData = {{
                         uid: user.uid,
                         email: user.email,
                         displayName: user.displayName
-                    }});
+                    }};
+                    sendToStreamlit('auth_success', userData);
                 }} else {{
+                    // User is signed out.
                     sendToStreamlit('auth_failure', null);
                 }}
             }});
@@ -145,31 +151,18 @@ def firebase_auth_component():
                     }});
             }};
 
-            // Initial state message (important for Streamlit to render correctly)
-            auth.onAuthStateChanged(user => {{
-                if (user) {{
-                    Streamlit.setComponentValue({{ type: 'auth_success', data: {{ uid: user.uid, email: user.email, displayName: user.displayName }} }});
-                }} else {{
-                    Streamlit.setComponentValue({{ type: 'auth_failure', data: null }});
-                }}
-            }});
-
-
-            // Streamlit.setComponentReady() is now the recommended way to send data back
-            // However, this setup often benefits from initial state setting.
-            // Let's set up a listener for initial component load if needed
-            const observer = new MutationObserver((mutationsList, observer) => {
-                if (document.readyState === 'complete') {
-                    // Send initial state once the document is ready and Firebase auth is checked
-                    if (auth.currentUser) {
-                         Streamlit.setComponentValue({ type: 'auth_success', data: { uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName } });
+            // Ensure Streamlit.setComponentValue is available before use
+            if (window.streamlit && window.streamlit.setComponentValue) {
+                // Initial state check after component loads and Firebase auth is ready
+                auth.onAuthStateChanged(user => {
+                    if (user) {
+                        Streamlit.setComponentValue({{"type": "auth_success", "data": {{"uid": user.uid, "email": user.email, "displayName": user.displayName}}}});
                     } else {
-                         Streamlit.setComponentValue({ type: 'auth_failure', data: null });
+                        Streamlit.setComponentValue({{"type": "auth_failure", "data": null}});
                     }
-                    observer.disconnect(); // Stop observing once sent
-                }
-            });
-            observer.observe(document.body, { childList: true, subtree: true });
+                });
+            }
+
 
         </script>
         <style>
@@ -197,15 +190,13 @@ def firebase_auth_component():
     </body>
     </html>
     """
-    # The return value of components.html is the data sent back via Streamlit.setComponentValue
-    # We set a key to ensure it re-renders.
     return components.html(html_code, height=100, scrolling=False, key="firebase_auth_ui_component")
 
 
 # --- Streamlit Message Listener (to get data from JavaScript component) ---
-# This block now uses the return value of components.html directly.
 auth_component_value = None
-if st.session_state.auth_status == "pending":
+# Render the auth component if auth status is pending or logged out
+if st.session_state.auth_status == "pending" or st.session_state.auth_status == "logged_out":
     auth_component_value = firebase_auth_component() # Render and get return value
 
     if auth_component_value: # If the component sent a message back
@@ -934,7 +925,7 @@ if st.session_state.user_id:
                                 st.success(f"Task '{task['Chapter']}' deleted successfully!", icon="✅")
                                 st.session_state[f"show_confirm_{key_fk}"] = False
                                 st.rerun()
-                            else: st.error(f"Failed to delete '{task['Chapter']}'. Please try again.", icon="❌")
+                            else: st.error("Failed to delete. Please try again.", icon="❌")
                 with col_no:
                     if st.button("No, Cancel", key=f"confirm_del_no_{key_fk}"):
                         st.session_state[f"show_confirm_{key_fk}"] = False
@@ -979,15 +970,12 @@ if st.session_state.user_id:
     if st.session_state.auth_status == "logged_in":
         st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
         if st.sidebar.button("Log Out"):
-            # Send message to JS component to trigger logout
             js_code = """
             <script>
                 window.signOutUser();
             </script>
             """
             components.html(js_code, height=0)
-            # st.session_state.auth_status = "pending" # Will be set by JS callback
-            # st.rerun() # Will be triggered by JS callback
 
         st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
 
@@ -1008,26 +996,23 @@ if st.session_state.user_id:
     elif st.session_state.auth_status == "logged_out":
         st.warning("Please log in to use the Study Tracker.")
         if st.button("Sign in with Google"):
-            # Send message to JS component to trigger login
             js_code = """
             <script>
                 window.signInWithGoogle();
             </script>
             """
             components.html(js_code, height=0)
-            # st.session_state.auth_status will be updated by JS callback
 
     else: # auth_status == "pending"
         st.info("Checking authentication status...")
-        # The key is crucial to ensure Streamlit knows to receive data from this specific component
-        auth_return_value = firebase_auth_component() # This is where the JS sends data back
+        auth_return_value = firebase_auth_component()
 
-        if auth_return_value: # If the component sent a message back
+        if auth_return_value:
             if auth_return_value.get("type") == "auth_success":
                 st.session_state.user_id = auth_return_value["data"]["uid"]
                 st.session_state.user_email = auth_return_value["data"]["email"]
                 st.session_state.auth_status = "logged_in"
-                st.rerun() # Re-run to update UI to logged-in state
+                st.rerun()
             elif auth_return_value.get("type") == "auth_failure":
                 st.session_state.auth_status = "logged_out"
                 st.session_state.user_id = None
