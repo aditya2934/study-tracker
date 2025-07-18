@@ -1,6 +1,6 @@
 import streamlit as st
 import firebase_admin
-from firebase_admin import credentials, db
+from firebase_admin import credentials, db, auth # Import auth for user management (optional for this simple example)
 from datetime import date
 import uuid
 import pandas as pd
@@ -9,7 +9,9 @@ import time
 import streamlit.components.v1 as components
 
 # --- CONFIGURATION (using Streamlit Secrets) ---
-DB_PATH = "tasks"
+# We will still use the admin SDK for general setup/management if needed,
+# but frontend operations will use Firebase client SDK.
+DB_PATH_ROOT = "users" # New root path for user-specific data
 
 # --- AUDIO ASSETS (URLs) ---
 POMODORO_FINISH_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
@@ -17,13 +19,16 @@ TASK_TICK_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-48.mp3"
 WHITE_NOISE_URL = "https://www.soundjay.com/nature/sounds/whitenoise-1.mp3"
 
 
-# --- FIREBASE INITIALIZATION ---
-@st.cache_resource(show_spinner="Initializing Firebase...")
-def initialize_firebase_connection():
+# --- FIREBASE ADMIN SDK INITIALIZATION (For server-side operations if needed) ---
+# @st.cache_resource ensures this function runs only once across reruns.
+@st.cache_resource(show_spinner="Initializing Firebase Admin SDK...")
+def initialize_firebase_admin_sdk():
     firebase_config = st.secrets.get("firebase")
 
     if firebase_config is None:
-        st.error("Firebase configuration not found in Streamlit secrets. Please ensure you have a `[firebase]` section in `.streamlit/secrets.toml` or your Streamlit Cloud secrets.", icon="❌")
+        st.error("Firebase Admin SDK configuration not found in Streamlit secrets. "
+                 "Please ensure you have a `[firebase]` section in `.streamlit/secrets.toml` "
+                 "or your Streamlit Cloud secrets.", icon="❌")
         st.stop()
 
     DATABASE_URL = firebase_config.get("database_url")
@@ -50,36 +55,196 @@ def initialize_firebase_connection():
             }
             cred = credentials.Certificate(firebase_creds)
             firebase_admin.initialize_app(cred, {"databaseURL": DATABASE_URL})
-            st.success("Firebase initialized successfully!", icon="✅")
+            st.success("Firebase Admin SDK initialized successfully!", icon="✅")
             return True
         except KeyError as ke:
             st.error(f"Missing Firebase secret key: `{ke}`. Please check your `.streamlit/secrets.toml` file.", icon="❌")
             st.stop()
         except Exception as e:
-            st.error(f"Error initializing Firebase. Please verify your `.streamlit/secrets.toml` and network connection. Error: {e}", icon="❌")
+            st.error(f"Error initializing Firebase Admin SDK. Please verify your `.streamlit/secrets.toml` and network connection. Error: {e}", icon="❌")
             st.stop()
     return False
 
-initialize_firebase_connection()
+initialize_firebase_admin_sdk()
 
 
-# --- AUDIO PLAYBACK FUNCTION ---
-def play_sound(sound_url: str, unique_key: str):
-    """Embeds an HTML audio player that plays automatically."""
-    audio_html = f"""
-    <audio autoplay style="display:none;" key="{unique_key}">
-      <source src="{sound_url}" type="audio/mpeg">
-      Your browser does not support the audio element.
-    </audio>
+# --- CLIENT-SIDE FIREBASE SDK CONFIG (for Authentication in JavaScript) ---
+# This config comes from your Firebase Project settings -> Project settings -> General
+# Scroll down to "Your apps" and select "Web app" (</>)
+# Copy the 'firebaseConfig' object.
+FIREBASE_CLIENT_CONFIG = json.dumps({
+    "apiKey": st.secrets["firebase_client"]["api_key"],
+    "authDomain": st.secrets["firebase_client"]["auth_domain"],
+    "projectId": st.secrets["firebase_client"]["project_id"],
+    "databaseURL": st.secrets["firebase_client"]["database_url"],
+    "storageBucket": st.secrets["firebase_client"]["storage_bucket"],
+    "messagingSenderId": st.secrets["firebase_client"]["messaging_sender_id"],
+    "appId": st.secrets["firebase_client"]["app_id"],
+    "measurementId": st.secrets["firebase_client"].get("measurement_id", "") # Optional
+})
+
+# --- SESSION STATE INITIALIZATION FOR AUTHENTICATION ---
+if "user_id" not in st.session_state:
+    st.session_state.user_id = None
+if "user_email" not in st.session_state:
+    st.session_state.user_email = None
+if "auth_status" not in st.session_state:
+    st.session_state.auth_status = "pending" # pending, logged_in, logged_out
+
+# --- Streamlit Components for Authentication (using custom HTML/JS) ---
+# This component handles the actual Firebase client-side authentication flow.
+def firebase_auth_component():
+    html_code = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+        <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
+        <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
+        <script>
+            // Your Firebase project configuration
+            const firebaseConfig = {FIREBASE_CLIENT_CONFIG};
+
+            // Initialize Firebase
+            if (!firebase.apps.length) {{
+                firebase.initializeApp(firebaseConfig);
+            }} else {{
+                firebase.app(); // if already initialized, use that app
+            }}
+
+            const auth = firebase.auth();
+            const provider = new firebase.auth.GoogleAuthProvider();
+
+            auth.onAuthStateChanged(user => {{
+                if (user) {{
+                    // User is signed in.
+                    const userData = {{
+                        uid: user.uid,
+                        email: user.email,
+                        displayName: user.displayName
+                    }};
+                    // Send user data back to Streamlit
+                    window.parent.postMessage({{
+                        type: 'streamlit:auth_success',
+                        data: userData
+                    }}, '*');
+                }} else {{
+                    // User is signed out.
+                    window.parent.postMessage({{
+                        type: 'streamlit:auth_failure'
+                    }}, '*');
+                }}
+            }});
+
+            function signInWithGoogle() {{
+                auth.signInWithPopup(provider)
+                    .catch((error) => {{
+                        console.error("Auth error: ", error);
+                        window.parent.postMessage({{
+                            type: 'streamlit:auth_error',
+                            data: error.message
+                        }}, '*');
+                    }});
+            }}
+
+            function signOutUser() {{
+                auth.signOut()
+                    .then(() => {{
+                        window.parent.postMessage({{
+                            type: 'streamlit:auth_signed_out'
+                        }}, '*');
+                    }})
+                    .catch((error) => {{
+                        console.error("Sign out error: ", error);
+                        window.parent.postMessage({{
+                            type: 'streamlit:auth_error',
+                            data: error.message
+                        }}, '*');
+                    }});
+            }}
+
+            // Listen for messages from Streamlit (e.g., to trigger login/logout)
+            window.addEventListener("message", (event) => {{
+                if (event.data.type === 'streamlit:trigger_login') {{
+                    signInWithGoogle();
+                }} else if (event.data.type === 'streamlit:trigger_logout') {{
+                    signOutUser();
+                }}
+            }});
+        </script>
+        <style>
+            body {{ font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: transparent; }}
+            .auth-buttons {{ text-align: center; }}
+            .auth-buttons button {{
+                background-color: #4285F4; /* Google blue */
+                color: white;
+                padding: 10px 20px;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+                font-size: 16px;
+                margin: 5px;
+                transition: background-color 0.3s ease;
+            }}
+            .auth-buttons button:hover {{ background-color: #357ae8; }}
+        </style>
+    </head>
+    <body>
+        <div class="auth-buttons">
+            <button id="signInButton" onclick="signInWithGoogle()">Sign in with Google</button>
+            <button id="signOutButton" onclick="signOutUser()" style="display: none;">Sign Out</button>
+        </div>
+    </body>
+    </html>
     """
-    components.html(audio_html, height=0)
+    # The key ensures the component is re-rendered properly on state changes
+    components.html(html_code, height=100, scrolling=False)
 
 
-# --- FIREBASE DATA OPERATIONS ---
+# --- Streamlit Message Listener (to get data from JavaScript component) ---
+# This is a hacky way to get data from JS back to Streamlit.
+# It requires Streamlit >= 1.25.0
+if st.session_state.auth_status == "pending":
+    # Render the auth component and listen for messages
+    firebase_auth_component()
+    # This will receive messages from the JavaScript part
+    message = st.runtime.scriptrunner.script_run_context.get_script_run_context()._enqueue_message(
+        None,
+        "__internal_component_message__"
+    )
+    if message:
+        if message.get("type") == "streamlit:auth_success":
+            st.session_state.user_id = message["data"]["uid"]
+            st.session_state.user_email = message["data"]["email"]
+            st.session_state.auth_status = "logged_in"
+            st.rerun() # Re-run to update UI to logged-in state
+        elif message.get("type") == "streamlit:auth_failure":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.rerun()
+        elif message.get("type") == "streamlit:auth_error":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.error(f"Authentication Error: {message['data']}", icon="❌")
+            st.rerun()
+        elif message.get("type") == "streamlit:auth_signed_out":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.rerun()
+
+
+# --- Functions to interact with Firebase Realtime Database (USER SPECIFIC) ---
+# Modify these functions to use the user's UID
 @st.cache_data(ttl=300, show_spinner="Loading your study tasks...")
-def load_tasks():
+def load_tasks_for_user(user_id):
+    if not user_id:
+        return [], [], [], set()
     try:
-        ref = db.reference(DB_PATH)
+        # Data is now stored under users/{user_id}/tasks
+        ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
         data = ref.get()
         if not data:
             return [], [], [], set()
@@ -103,9 +268,12 @@ def load_tasks():
         st.error(f"Error loading tasks from Firebase: {e}", icon="❌")
         return [], [], [], set()
 
-def save_task(task, check, key=None):
+def save_task_for_user(user_id, task, check, key=None):
+    if not user_id:
+        st.warning("Cannot save task: No user logged in.")
+        return None
     try:
-        ref = db.reference(DB_PATH)
+        ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
         if not key:
             key = str(uuid.uuid4())
         ref.child(key).set({"task": task, "check": check})
@@ -114,83 +282,96 @@ def save_task(task, check, key=None):
         st.error(f"Error saving task to Firebase: {e}", icon="❌")
         return None
 
-def delete_task_from_db(key):
+def delete_task_from_db_for_user(user_id, key):
+    if not user_id:
+        st.warning("Cannot delete task: No user logged in.")
+        return False
     try:
-        db.reference(DB_PATH).child(key).delete()
+        db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks").child(key).delete()
         return True
     except Exception as e:
         st.error(f"Error deleting task from Firebase: {e}", icon="❌")
         return False
 
-# --- SESSION STATE INITIALIZATION ---
-if "tasks" not in st.session_state:
-    st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, loaded_subjects = load_tasks()
-    st.session_state.all_subjects = loaded_subjects
+# --- AUDIO PLAYBACK FUNCTION ---
+def play_sound(sound_url: str, unique_key: str):
+    """Embeds an HTML audio player that plays automatically."""
+    audio_html = f"""
+    <audio autoplay style="display:none;" key="{unique_key}">
+      <source src="{sound_url}" type="audio/mpeg">
+      Your browser does not support the audio element.
+    </audio>
+    """
+    components.html(audio_html, height=0)
 
-    if not st.session_state.all_subjects:
-        st.session_state.all_subjects.add("Anatomy")
 
-# Logic to set/restore selected_view_subject using URL query parameters
-query_params = st.query_params
+# --- SESSION STATE INITIALIZATION for APP DATA (depends on user_id) ---
+# This block now runs ONLY if the user is logged in
+if st.session_state.user_id:
+    if "tasks" not in st.session_state:
+        st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, loaded_subjects = load_tasks_for_user(st.session_state.user_id)
+        st.session_state.all_subjects = loaded_subjects
 
-if "subject" in query_params:
-    requested_subject = query_params["subject"]
-    if requested_subject in st.session_state.all_subjects:
-        st.session_state.selected_view_subject = requested_subject
+        if not st.session_state.all_subjects:
+            st.session_state.all_subjects.add("Anatomy") # Ensure at least one subject exists
+
+    query_params = st.query_params
+
+    if "subject" in query_params:
+        requested_subject = query_params["subject"]
+        if requested_subject in st.session_state.all_subjects:
+            st.session_state.selected_view_subject = requested_subject
+        else:
+            if st.session_state.all_subjects:
+                st.session_state.selected_view_subject = sorted(list(st.session_state.all_subjects))[0]
+            else:
+                st.session_state.selected_view_subject = None
     else:
-        if st.session_state.all_subjects:
-            st.session_state.selected_view_subject = sorted(list(st.session_state.all_subjects))[0]
-        else:
-            st.session_state.selected_view_subject = None
-else:
-    if "selected_view_subject" not in st.session_state or \
-       (st.session_state.selected_view_subject not in st.session_state.all_subjects and st.session_state.all_subjects):
-        if st.session_state.all_subjects:
-            st.session_state.selected_view_subject = sorted(list(st.session_state.all_subjects))[0]
-        else:
-            st.session_state.selected_view_subject = None
+        if "selected_view_subject" not in st.session_state or \
+           (st.session_state.selected_view_subject not in st.session_state.all_subjects and st.session_state.all_subjects):
+            if st.session_state.all_subjects:
+                st.session_state.selected_view_subject = sorted(list(st.session_state.all_subjects))[0]
+            else:
+                st.session_state.selected_view_subject = None
 
-if "editing_task_key" not in st.session_state:
-    st.session_state.editing_task_key = None
-if "temp_edit_task_data" not in st.session_state:
-    st.session_state.temp_edit_task_data = {}
+    if "editing_task_key" not in st.session_state:
+        st.session_state.editing_task_key = None
+    if "temp_edit_task_data" not in st.session_state:
+        st.session_state.temp_edit_task_data = {}
 
-if "filter_start_date" not in st.session_state:
-    st.session_state.filter_start_date = None
-if "filter_end_date" not in st.session_state:
-    st.session_state.filter_end_date = None
-    
-# --- Flags for playing sounds ---
-if "play_pomodoro_finish_sound" not in st.session_state:
-    st.session_state.play_pomodoro_finish_sound = False
-if "play_tick_sound" not in st.session_state:
-    st.session_state.play_tick_sound = False
+    if "filter_start_date" not in st.session_state:
+        st.session_state.filter_start_date = None
+    if "filter_end_date" not in st.session_state:
+        st.session_state.filter_end_date = None
 
+    if "play_pomodoro_finish_sound" not in st.session_state:
+        st.session_state.play_pomodoro_finish_sound = False
+    if "play_tick_sound" not in st.session_state:
+        st.session_state.play_tick_sound = False
 
-# --- Pomodoro Timer Configuration & State Initialization ---
-DEFAULT_WORK_MINS = 25
-DEFAULT_BREAK_MINS = 5
-DEFAULT_LONG_BREAK_MINS = 15
+    DEFAULT_WORK_MINS = 25
+    DEFAULT_BREAK_MINS = 5
+    DEFAULT_LONG_BREAK_MINS = 15
 
-def init_pomodoro_state():
-    if "pomodoro_work_mins" not in st.session_state:
-        st.session_state.pomodoro_work_mins = DEFAULT_WORK_MINS
-    if "pomodoro_break_mins" not in st.session_state:
-        st.session_state.pomodoro_break_mins = DEFAULT_BREAK_MINS
-    if "pomodoro_long_break_mins" not in st.session_state:
-        st.session_state.pomodoro_long_break_mins = DEFAULT_LONG_BREAK_MINS
-    if "pomodoro_running" not in st.session_state:
-        st.session_state.pomodoro_running = False
-    if "pomodoro_time_left" not in st.session_state:
-        st.session_state.pomodoro_time_left = st.session_state.pomodoro_work_mins * 60
-    if "pomodoro_mode" not in st.session_state:
-        st.session_state.pomodoro_mode = "work"
-    if "pomodoro_cycles" not in st.session_state:
-        st.session_state.pomodoro_cycles = 0
-    if "pomodoro_last_update_time" not in st.session_state:
-        st.session_state.pomodoro_last_update_time = time.time()
+    def init_pomodoro_state():
+        if "pomodoro_work_mins" not in st.session_state:
+            st.session_state.pomodoro_work_mins = DEFAULT_WORK_MINS
+        if "pomodoro_break_mins" not in st.session_state:
+            st.session_state.pomodoro_break_mins = DEFAULT_BREAK_MINS
+        if "pomodoro_long_break_mins" not in st.session_state:
+            st.session_state.pomodoro_long_break_mins = DEFAULT_LONG_BREAK_MINS
+        if "pomodoro_running" not in st.session_state:
+            st.session_state.pomodoro_running = False
+        if "pomodoro_time_left" not in st.session_state:
+            st.session_state.pomodoro_time_left = st.session_state.pomodoro_work_mins * 60
+        if "pomodoro_mode" not in st.session_state:
+            st.session_state.pomodoro_mode = "work"
+        if "pomodoro_cycles" not in st.session_state:
+            st.session_state.pomodoro_cycles = 0
+        if "pomodoro_last_update_time" not in st.session_state:
+            st.session_state.pomodoro_last_update_time = time.time()
 
-init_pomodoro_state()
+    init_pomodoro_state()
 
 # --- Pomodoro Timer Functions ---
 def update_timer_duration_on_edit():
@@ -315,7 +496,7 @@ def white_noise_player():
     """A self-contained HTML/JS component to play/pause white noise."""
     st.markdown('<div class="white-noise-container">', unsafe_allow_html=True)
     st.caption("Background White Noise")
-    
+
     player_html = f"""
     <audio id="whiteNoisePlayer" loop>
         <source src="{WHITE_NOISE_URL}" type="audio/mpeg">
@@ -358,7 +539,7 @@ def pomodoro_timer_section():
         if st.session_state.pomodoro_time_left <= 0:
             st.session_state.pomodoro_time_left = 0
             st.session_state.pomodoro_running = False
-            
+
             st.session_state.play_pomodoro_finish_sound = True
 
             st.success(f"{st.session_state.pomodoro_mode.replace('_', ' ').title()} session finished!", icon="✅")
@@ -402,7 +583,7 @@ def pomodoro_timer_section():
             st.number_input("Short Break", min_value=1, max_value=30, value=st.session_state.pomodoro_break_mins, key="pomodoro_break_mins", on_change=update_timer_duration_on_edit)
         with col_edit3:
             st.number_input("Long Break", min_value=1, max_value=60, value=st.session_state.pomodoro_long_break_mins, key="pomodoro_long_break_mins", on_change=update_timer_duration_on_edit)
-    
+
     white_noise_player()
 
     st.markdown('</div>', unsafe_allow_html=True)
@@ -417,7 +598,7 @@ def add_task_form():
     with st.sidebar.expander("➕ Add New Task", expanded=True):
         current_subjects_list = sorted(list(st.session_state.all_subjects))
         subject_options = ["➕ Add new subject"] + current_subjects_list
-        
+
         chapter_value = st.session_state.get("chapter_input_val", "")
         sn_value = st.session_state.get("sn_input_val", "")
         laq_value = st.session_state.get("laq_input_val", "")
@@ -440,7 +621,7 @@ def add_task_form():
         chapter_input = st.text_input("Chapter", value=chapter_value, key="chapter_input")
         sn_input = st.text_area("Short Notes (SN), one per line", value=sn_value, key="sn_input")
         laq_input = st.text_area("Long Answer Questions (LAQ), one per line", value=laq_value, key="laq_input")
-        
+
         sn_list = [l.strip() for l in sn_input.splitlines() if l.strip()]
         laq_list = [l.strip() for l in laq_input.splitlines() if l.strip()]
 
@@ -464,21 +645,21 @@ def add_task_form():
                     "Priority": priority_input, "Deadline": str(deadline_input)
                 }
                 check = {"SN": [False] * len(sn_list), "LAQ": [False] * len(laq_list)}
-                
-                key = save_task(task, check)
+
+                key = save_task_for_user(st.session_state.user_id, task, check) # IMPORTANT: Pass user_id
                 if key:
                     st.cache_data.clear()
-                    st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks()
+                    st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks_for_user(st.session_state.user_id) # IMPORTANT: Pass user_id
                     st.session_state.all_subjects.update(new_subjects)
-                    
+
                     st.success(f"Task '{cleaned_chapter}' added successfully!", icon="✅")
-                    
+
                     st.session_state.chapter_input_val = ""
                     st.session_state.sn_input_val = ""
                     st.session_state.laq_input_val = ""
                     if selected_subject_input == "➕ Add new subject":
                         st.session_state.new_subject_input_val = ""
-                    
+
                     st.rerun()
                 else:
                     st.error("Failed to add task. Please try again.", icon="❌")
@@ -506,7 +687,7 @@ def subject_filter_section():
         st.info("No subjects available yet. Add a task to create subjects.")
         st.session_state.selected_view_subject = None
         return
-    
+
     initial_index = 0
     if st.session_state.selected_view_subject in current_display_subjects:
         initial_index = current_display_subjects.index(st.session_state.selected_view_subject)
@@ -536,13 +717,12 @@ def get_filtered_tasks():
     end_date_filter = st.session_state.get('filter_end_date')
 
     for i, task in enumerate(st.session_state.tasks):
-        # FIX HERE: Corrected typo from selected_subject_view_subject to selected_view_subject
         if st.session_state.selected_view_subject is None or task.get("Subject") != st.session_state.selected_view_subject:
             continue
 
         if st.session_state.get('filter_priorities') and task.get("Priority") not in st.session_state.filter_priorities:
             continue
-            
+
         if search_lower:
             match_found = (search_lower in task.get("Chapter", "").lower() or
                            any(search_lower in sn.lower() for sn in task.get("SN", [])) or
@@ -591,16 +771,16 @@ def completion_overview_section():
 def display_edit_form(current_task_data, current_task_checks, current_key_fk):
     st.subheader(f"✏️ Editing: {current_task_data['Chapter']}")
     all_subjects_for_edit = sorted(list(st.session_state.all_subjects))
-    
+
     if current_task_data.get("Subject") and current_task_data.get("Subject") not in all_subjects_for_edit:
         all_subjects_for_edit.append(current_task_data["Subject"])
         all_subjects_for_edit.sort()
-    
+
     try: 
         current_subject_index = all_subjects_for_edit.index(current_task_data.get("Subject", ""))
     except ValueError: 
         current_subject_index = 0 if all_subjects_for_edit else 0
-    
+
     edited_subject = st.selectbox("Subject", all_subjects_for_edit, index=current_subject_index, key=f"edit_subject_{current_key_fk}")
     edited_chapter = st.text_input("Chapter", value=current_task_data.get("Chapter", ""), key=f"edit_chapter_{current_key_fk}")
     edited_sn = st.text_area("Short Notes (SN)", value="\n".join(current_task_data.get("SN", [])), key=f"edit_sn_{current_key_fk}")
@@ -630,7 +810,7 @@ def display_edit_form(current_task_data, current_task_checks, current_key_fk):
                         new_checks_sn[i] = current_task_checks["SN"][original_sn_index]
                     except (ValueError, KeyError, IndexError): 
                         pass
-                
+
                 new_checks_laq = [False] * len(new_laq_list)
                 for i, laq_item in enumerate(new_laq_list):
                     try: 
@@ -638,7 +818,7 @@ def display_edit_form(current_task_data, current_task_checks, current_key_fk):
                         new_checks_laq[i] = current_task_checks["LAQ"][original_laq_index]
                     except (ValueError, KeyError, IndexError): 
                         pass
-                
+
                 updated_task = {
                     "Subject": edited_subject.strip(), 
                     "Chapter": edited_chapter.strip(), 
@@ -648,11 +828,12 @@ def display_edit_form(current_task_data, current_task_checks, current_key_fk):
                     "Deadline": str(edited_deadline)
                 }
                 updated_checks = {"SN": new_checks_sn, "LAQ": new_checks_laq}
-                
+
                 with st.spinner("Saving changes..."):
-                    if save_task(updated_task, updated_checks, key=current_key_fk):
+                    key_saved = save_task_for_user(st.session_state.user_id, updated_task, updated_checks, key=current_key_fk) # IMPORTANT: Pass user_id
+                    if key_saved:
                         st.cache_data.clear()
-                        st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks()
+                        st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks_for_user(st.session_state.user_id) # IMPORTANT: Pass user_id
                         st.session_state.all_subjects.update(new_subjects)
                         st.session_state.editing_task_key = None
                         st.session_state.temp_edit_task_data = {}
@@ -693,7 +874,7 @@ def task_list_section():
         total_items = total_sn + total_laq
         sn_checked_count, laq_checked_count = sum(checks.get("SN", [])), sum(checks.get("LAQ", []))
         is_completed = (total_items > 0) and (sn_checked_count == total_sn) and (laq_checked_count == total_laq)
-        
+
         task_container_class = "task-item completed-task" if is_completed else "task-item"
         st.markdown(f'<div id="task-{key_fk}" class="{task_container_class}">', unsafe_allow_html=True)
 
@@ -713,12 +894,12 @@ def task_list_section():
                         if st.checkbox(t, key=f"sn_{key_fk}_{j}", value=checks["SN"][j]):
                             if not checks["SN"][j]:
                                 checks["SN"][j] = True
-                                save_task(task, checks, key=key_fk)
+                                save_task_for_user(st.session_state.user_id, task, checks, key=key_fk) # IMPORTANT: Pass user_id
                                 st.session_state.play_tick_sound = True
                                 st.rerun()
                         elif checks["SN"][j]:
                             checks["SN"][j] = False
-                            save_task(task, checks, key=key_fk)
+                            save_task_for_user(st.session_state.user_id, task, checks, key=key_fk) # IMPORTANT: Pass user_id
                             st.rerun()
             with col2:
                 if task.get("LAQ"):
@@ -727,12 +908,12 @@ def task_list_section():
                         if st.checkbox(t, key=f"laq_{key_fk}_{j}", value=checks["LAQ"][j]):
                             if not checks["LAQ"][j]:
                                 checks["LAQ"][j] = True
-                                save_task(task, checks, key=key_fk)
+                                save_task_for_user(st.session_state.user_id, task, checks, key=key_fk) # IMPORTANT: Pass user_id
                                 st.session_state.play_tick_sound = True
                                 st.rerun()
                         elif checks["LAQ"][j]:
                             checks["LAQ"][j] = False
-                            save_task(task, checks, key=key_fk)
+                            save_task_for_user(st.session_state.user_id, task, checks, key=key_fk) # IMPORTANT: Pass user_id
                             st.rerun()
             with col3:
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -752,10 +933,10 @@ def task_list_section():
             with col_yes:
                 if st.button("Yes, Delete", key=f"confirm_del_yes_{key_fk}"):
                     with st.spinner(f"Deleting '{task['Chapter']}'..."):
-                        if delete_task_from_db(key_fk):
+                        if delete_task_from_db_for_user(st.session_state.user_id, key_fk): # IMPORTANT: Pass user_id
                             st.session_state.last_deleted = (task, checks, key_fk)
                             st.cache_data.clear()
-                            st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks()
+                            st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks_for_user(st.session_state.user_id) # IMPORTANT: Pass user_id
                             st.session_state.all_subjects.update(new_subjects)
                             st.success(f"Task '{task['Chapter']}' deleted successfully!", icon="✅")
                             st.session_state[f"show_confirm_{key_fk}"] = False
@@ -775,9 +956,9 @@ def undo_delete_section():
         if st.button("↩️ Undo Last Delete", key="undo_delete_button"):
             task_to_restore, checks_to_restore, key_to_restore = st.session_state.last_deleted
             with st.spinner("Restoring task..."):
-                if save_task(task_to_restore, checks_to_restore, key_to_restore):
+                if save_task_for_user(st.session_state.user_id, task_to_restore, checks_to_restore, key_to_restore): # IMPORTANT: Pass user_id
                     st.cache_data.clear()
-                    st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks()
+                    st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks_for_user(st.session_state.user_id) # IMPORTANT: Pass user_id
                     st.session_state.all_subjects.update(new_subjects)
                     st.session_state.last_deleted = None
                     st.success("Task restored successfully!", icon="✅")
@@ -800,17 +981,49 @@ def export_csv_section():
         st.download_button("Export Current Subject's Tasks to CSV", csv, f"{st.session_state.selected_view_subject}_tasks.csv", "text/csv")
     else: st.info("No tasks to export for the selected subject.")
 
-# --- Render Sections ---
-add_task_form()
-st.sidebar.divider()
-undo_delete_section()
 
-filter_and_search_options()
-pomodoro_timer_section()
-st.divider()
-subject_filter_section()
-completion_overview_section()
-st.divider()
-task_list_section()
-st.divider()
-export_csv_section()
+# --- MAIN APP LAYOUT (Conditional based on Authentication) ---
+if st.session_state.auth_status == "logged_in":
+    st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
+    if st.sidebar.button("Log Out"):
+        # Send message to JS component to trigger logout
+        js_code = """
+        <script>
+            window.parent.postMessage({ type: 'streamlit:trigger_logout' }, '*');
+        </script>
+        """
+        components.html(js_code, height=0)
+        # st.session_state.auth_status = "pending" # Will be set by JS callback
+        # st.rerun() # Will be triggered by JS callback
+
+    st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
+
+    add_task_form()
+    st.sidebar.divider()
+    undo_delete_section()
+
+    filter_and_search_options()
+    pomodoro_timer_section()
+    st.divider()
+    subject_filter_section()
+    completion_overview_section()
+    st.divider()
+    task_list_section()
+    st.divider()
+    export_csv_section()
+
+elif st.session_state.auth_status == "logged_out":
+    st.warning("Please log in to use the Study Tracker.")
+    if st.button("Sign in with Google"):
+        # Send message to JS component to trigger login
+        js_code = """
+        <script>
+            window.parent.postMessage({ type: 'streamlit:trigger_login' }, '*');
+        </script>
+        """
+        components.html(js_code, height=0)
+        # st.session_state.auth_status will be updated by JS callback
+
+else: # auth_status == "pending"
+    st.info("Checking authentication status...")
+    firebase_auth_component() # This needs to be rendered continuously to listen for auth changes
