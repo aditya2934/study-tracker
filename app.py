@@ -1,4 +1,3 @@
-
 import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, db, auth # Import auth for user management (optional for this simple example)
@@ -159,18 +158,18 @@ def firebase_auth_component():
             // Streamlit.setComponentReady() is now the recommended way to send data back
             // However, this setup often benefits from initial state setting.
             // Let's set up a listener for initial component load if needed
-            const observer = new MutationObserver((mutationsList, observer) => {
+            const observer = new MutationObserver((mutationsList, observer) => {{
                 if (document.readyState === 'complete') {{
                     // Send initial state once the document is ready and Firebase auth is checked
-                    if (auth.currentUser) {
-                         Streamlit.setComponentValue({ type: 'auth_success', data: { uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName } });
-                    } else {
-                         Streamlit.setComponentValue({ type: 'auth_failure', data: null });
-                    }
+                    if (auth.currentUser) {{
+                         Streamlit.setComponentValue({{ type: 'auth_success', data: {{ uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName }} }});
+                    }} else {{
+                         Streamlit.setComponentValue({{ type: 'auth_failure', data: null }});
+                    }}
                     observer.disconnect(); // Stop observing once sent
-                }
-            });
-            observer.observe(document.body, { childList: true, subtree: true });
+                }}
+            }});
+            observer.observe(document.body, {{ childList: true, subtree: true }});
 
         </script>
         <style>
@@ -782,11 +781,8 @@ if st.session_state.user_id:
         priority_options = ["High", "Medium", "Low"]
         try: current_priority_index = priority_options.index(current_task_data.get("Priority", "Medium"))
         except ValueError: current_priority_index = 1
+        edited_deadline = st.date_input("Deadline", value=date.fromisoformat(current_task_data.get("Deadline", str(date.today()))), min_value=date.today(), key=f"edit_deadline_{current_key_fk}")
         edited_priority = st.selectbox("Priority", priority_options, index=current_priority_index, key=f"edit_priority_{current_key_fk}")
-        try: current_deadline_date_obj = date.fromisoformat(current_task_data.get("Deadline", str(date.today())))
-        except ValueError: current_deadline_date_obj = date.today()
-        initial_deadline_value = max(current_deadline_date_obj, date.today())
-        edited_deadline = st.date_input("Deadline", value=initial_deadline_value, min_value=date.today(), key=f"edit_deadline_{current_key_fk}")
         col_save, col_cancel = st.columns([0.15, 1])
         with col_save:
             if st.button("💾 Save Changes", key=f"save_edit_{current_key_fk}"):
@@ -932,7 +928,7 @@ if st.session_state.user_id:
                                 st.cache_data.clear()
                                 st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks_for_user(st.session_state.user_id)
                                 st.session_state.all_subjects.update(new_subjects)
-                                st.success(f"Task '{task['Chapter']}' deleted successfully!", icon="✅")
+                                st.success("Task restored successfully!", icon="✅")
                                 st.session_state[f"show_confirm_{key_fk}"] = False
                                 st.rerun()
                             else: st.error(f"Failed to delete '{task['Chapter']}'. Please try again.", icon="❌")
