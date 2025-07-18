@@ -160,7 +160,7 @@ def firebase_auth_component():
             // However, this setup often benefits from initial state setting.
             // Let's set up a listener for initial component load if needed
             const observer = new MutationObserver((mutationsList, observer) => {
-                if (document.readyState === 'complete') {
+                if (document.readyState === 'complete') {{
                     // Send initial state once the document is ready and Firebase auth is checked
                     if (auth.currentUser) {
                          Streamlit.setComponentValue({ type: 'auth_success', data: { uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName } });
