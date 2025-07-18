@@ -6,60 +6,72 @@ import uuid
 import pandas as pd
 import json
 import time
-import streamlit.components.v1 as components # Import components
+import streamlit.components.v1 as components
 
 # --- CONFIGURATION (using Streamlit Secrets) ---
-DATABASE_URL = st.secrets["firebase"]["database_url"]
 DB_PATH = "tasks"
 
 # --- AUDIO ASSETS (URLs) ---
-# Using reliable free sound sources. Replace with your own if you prefer.
 POMODORO_FINISH_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
 TASK_TICK_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-48.mp3"
-WHITE_NOISE_URL = "https://www.soundjay.com/nature/sounds/whitenoise-1.mp3" # Looping white noise
+WHITE_NOISE_URL = "https://www.soundjay.com/nature/sounds/whitenoise-1.mp3"
 
 
 # --- FIREBASE INITIALIZATION ---
-def initialize_firebase():
+@st.cache_resource(show_spinner="Initializing Firebase...")
+def initialize_firebase_connection():
+    firebase_config = st.secrets.get("firebase")
+
+    if firebase_config is None:
+        st.error("Firebase configuration not found in Streamlit secrets. Please ensure you have a `[firebase]` section in `.streamlit/secrets.toml` or your Streamlit Cloud secrets.", icon="❌")
+        st.stop()
+
+    DATABASE_URL = firebase_config.get("database_url")
+    if not DATABASE_URL:
+        st.error("`database_url` not found under `[firebase]` in Streamlit secrets.", icon="❌")
+        st.stop()
+
     if not firebase_admin._apps:
         try:
-            # Attempt to parse private_key correctly if it contains newlines
-            firebase_private_key = st.secrets["firebase"]["private_key"].replace('\\n', '\n')
+            firebase_private_key = firebase_config["private_key"].replace('\\n', '\n')
 
             firebase_creds = {
-                "type": st.secrets["firebase"]["type"],
-                "project_id": st.secrets["firebase"]["project_id"],
-                "private_key_id": st.secrets["firebase"]["private_key_id"],
-                "private_key": firebase_private_key, # Use the modified private_key
-                "client_email": st.secrets["firebase"]["client_email"],
-                "client_id": st.secrets["firebase"]["client_id"],
-                "auth_uri": st.secrets["firebase"]["auth_uri"],
-                "token_uri": st.secrets["firebase"]["token_uri"],
-                "auth_provider_x509_cert_url": st.secrets["firebase"]["auth_provider_x509_cert_url"],
-                "client_x509_cert_url": st.secrets["firebase"]["client_x509_cert_url"],
-                "universe_domain": st.secrets["firebase"]["universe_domain"],
+                "type": firebase_config["type"],
+                "project_id": firebase_config["project_id"],
+                "private_key_id": firebase_config["private_key_id"],
+                "private_key": firebase_private_key,
+                "client_email": firebase_config["client_email"],
+                "client_id": firebase_config["client_id"],
+                "auth_uri": firebase_config["auth_uri"],
+                "token_uri": firebase_config["token_uri"],
+                "auth_provider_x509_cert_url": firebase_config["auth_provider_x509_cert_url"],
+                "client_x509_cert_url": firebase_config["client_x509_cert_url"],
+                "universe_domain": firebase_config.get("universe_domain", "googleapis.com"),
             }
             cred = credentials.Certificate(firebase_creds)
             firebase_admin.initialize_app(cred, {"databaseURL": DATABASE_URL})
-        except Exception as e:
-            st.error(f"Error initializing Firebase. Check your `.streamlit/secrets.toml` and network connection. Ensure private_key is correctly formatted. Error: {e}", icon="❌")
+            st.success("Firebase initialized successfully!", icon="✅")
+            return True
+        except KeyError as ke:
+            st.error(f"Missing Firebase secret key: `{ke}`. Please check your `.streamlit/secrets.toml` file.", icon="❌")
             st.stop()
+        except Exception as e:
+            st.error(f"Error initializing Firebase. Please verify your `.streamlit/secrets.toml` and network connection. Error: {e}", icon="❌")
+            st.stop()
+    return False
 
-initialize_firebase()
+initialize_firebase_connection()
+
 
 # --- AUDIO PLAYBACK FUNCTION ---
 def play_sound(sound_url: str, unique_key: str):
     """Embeds an HTML audio player that plays automatically."""
-    # The audio player is hidden via CSS (display:none).
-    # A unique key ensures that Streamlit re-renders the component on each call,
-    # allowing the same sound to be played multiple times.
     audio_html = f"""
     <audio autoplay style="display:none;" key="{unique_key}">
       <source src="{sound_url}" type="audio/mpeg">
       Your browser does not support the audio element.
     </audio>
     """
-    # Use st.components.v1.html to render the HTML. Height=0 is important.
     components.html(audio_html, height=0)
 
 
@@ -116,7 +128,7 @@ if "tasks" not in st.session_state:
     st.session_state.all_subjects = loaded_subjects
 
     if not st.session_state.all_subjects:
-        st.session_state.all_subjects.add("Anatomy") # Ensure at least one subject exists
+        st.session_state.all_subjects.add("Anatomy")
 
 # Logic to set/restore selected_view_subject using URL query parameters
 query_params = st.query_params
@@ -289,14 +301,13 @@ body[data-theme="dark"] .white-noise-container button { background-color: #333; 
 
 
 # --- SOUND TRIGGER ---
-# This block checks flags and plays sounds. It's placed high to execute early on rerun.
 if st.session_state.get("play_pomodoro_finish_sound", False):
     play_sound(POMODORO_FINISH_SOUND_URL, "pomodoro_finish")
-    st.session_state.play_pomodoro_finish_sound = False # Reset flag
+    st.session_state.play_pomodoro_finish_sound = False
 
 if st.session_state.get("play_tick_sound", False):
-    play_sound(TASK_TICK_SOUND_URL, f"tick_{time.time()}") # Use time to ensure key is unique
-    st.session_state.play_tick_sound = False # Reset flag
+    play_sound(TASK_TICK_SOUND_URL, f"tick_{time.time()}")
+    st.session_state.play_tick_sound = False
 
 
 # --- WHITE NOISE PLAYER COMPONENT ---
@@ -348,7 +359,6 @@ def pomodoro_timer_section():
             st.session_state.pomodoro_time_left = 0
             st.session_state.pomodoro_running = False
             
-            # Set flag to play sound on the next rerun
             st.session_state.play_pomodoro_finish_sound = True
 
             st.success(f"{st.session_state.pomodoro_mode.replace('_', ' ').title()} session finished!", icon="✅")
@@ -393,16 +403,16 @@ def pomodoro_timer_section():
         with col_edit3:
             st.number_input("Long Break", min_value=1, max_value=60, value=st.session_state.pomodoro_long_break_mins, key="pomodoro_long_break_mins", on_change=update_timer_duration_on_edit)
     
-    # Add the white noise player inside the Pomodoro container
     white_noise_player()
 
     st.markdown('</div>', unsafe_allow_html=True)
 
     if st.session_state.pomodoro_running:
-        time.sleep(1)
+        time.sleep(0.1)
         st.rerun()
 
-# --- ADD NEW TASK FORM (No changes here) ---
+
+# --- Add New Task Form ---
 def add_task_form():
     with st.sidebar.expander("➕ Add New Task", expanded=True):
         current_subjects_list = sorted(list(st.session_state.all_subjects))
@@ -457,20 +467,23 @@ def add_task_form():
                 
                 key = save_task(task, check)
                 if key:
-                    st.session_state.tasks.append(task)
-                    st.session_state.task_checks.append(check)
-                    st.session_state.task_keys.append(key)
-                    st.session_state.all_subjects.add(cleaned_subject)
+                    st.cache_data.clear()
+                    st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks()
+                    st.session_state.all_subjects.update(new_subjects)
                     
                     st.success(f"Task '{cleaned_chapter}' added successfully!", icon="✅")
                     
-                    st.session_state.chapter_input_val, st.session_state.sn_input_val, st.session_state.laq_input_val, st.session_state.new_subject_input_val = "", "", "", ""
+                    st.session_state.chapter_input_val = ""
+                    st.session_state.sn_input_val = ""
+                    st.session_state.laq_input_val = ""
+                    if selected_subject_input == "➕ Add new subject":
+                        st.session_state.new_subject_input_val = ""
                     
                     st.rerun()
                 else:
                     st.error("Failed to add task. Please try again.", icon="❌")
 
-# --- FILTER AND SEARCH (No changes here) ---
+# --- FILTER AND SEARCH ---
 def filter_and_search_options():
     st.header("🔍 Filter & Search")
     col_priority, col_search = st.columns([0.5, 0.5])
@@ -480,65 +493,77 @@ def filter_and_search_options():
         st.session_state.search_query = st.text_input("Search Tasks", placeholder="Search by chapter, notes, or questions...", key="search_input")
     col_start_date, col_end_date = st.columns([0.5, 0.5])
     with col_start_date:
-        st.date_input("Start Date (Deadline)", value=st.session_state.filter_start_date, min_value=None, key="filter_start_date")
+        st.session_state.filter_start_date = st.date_input("Start Date (Deadline)", value=st.session_state.get('filter_start_date'), min_value=None, key="filter_start_date_widget")
     with col_end_date:
-        min_end_date = st.session_state.filter_start_date if st.session_state.filter_start_date else None
-        st.date_input("End Date (Deadline)", value=st.session_state.filter_end_date, min_value=min_end_date, key="filter_end_date")
+        min_end_date = st.session_state.get('filter_start_date') if st.session_state.get('filter_start_date') else None
+        st.session_state.filter_end_date = st.date_input("End Date (Deadline)", value=st.session_state.get('filter_end_date'), min_value=min_end_date, key="filter_end_date_widget")
     st.divider()
 
-# --- MAIN CONTENT (FIX APPLIED HERE) ---
+# --- MAIN CONTENT ---
 def subject_filter_section():
     current_display_subjects = sorted(list(st.session_state.all_subjects))
     if not current_display_subjects:
-        st.warning("No subjects available yet. Add a task to create subjects.")
+        st.info("No subjects available yet. Add a task to create subjects.")
         st.session_state.selected_view_subject = None
         return
     
     initial_index = 0
     if st.session_state.selected_view_subject in current_display_subjects:
         initial_index = current_display_subjects.index(st.session_state.selected_view_subject)
-    
-    # The 'on_change' callback is now the single source of truth for handling the change.
-    # We assign its value back to session state within the callback function.
+    elif st.session_state.all_subjects:
+        st.session_state.selected_view_subject = sorted(list(st.session_state.all_subjects))[0]
+        initial_index = 0
+
     st.selectbox(
         "📘 Select Subject to View", current_display_subjects,
-        key="view_subject_select", 
+        key="view_subject_select",
         index=initial_index,
         on_change=update_subject_query_param,
-        args=(st.session_state,) # Pass session_state to the callback
+        args=()
     )
 
-def update_subject_query_param(session_state_ref):
-    # This callback now handles both updating the URL and session state
-    new_subject = session_state_ref.view_subject_select
-    session_state_ref.selected_view_subject = new_subject
-    st.query_params["subject"] = new_subject
+def update_subject_query_param():
+    new_subject_value = st.session_state.view_subject_select
+    st.session_state.selected_view_subject = new_subject_value
+    st.query_params["subject"] = new_subject_value
+    st.rerun()
 
 
 def get_filtered_tasks():
     filtered_tasks = []
     search_lower = st.session_state.search_query.lower() if st.session_state.get('search_query') else ""
-    start_date_filter, end_date_filter = st.session_state.get('filter_start_date'), st.session_state.get('filter_end_date')
+    start_date_filter = st.session_state.get('filter_start_date')
+    end_date_filter = st.session_state.get('filter_end_date')
+
     for i, task in enumerate(st.session_state.tasks):
+        # FIX HERE: Corrected typo from selected_subject_view_subject to selected_view_subject
         if st.session_state.selected_view_subject is None or task.get("Subject") != st.session_state.selected_view_subject:
             continue
+
         if st.session_state.get('filter_priorities') and task.get("Priority") not in st.session_state.filter_priorities:
             continue
+            
         if search_lower:
             match_found = (search_lower in task.get("Chapter", "").lower() or
                            any(search_lower in sn.lower() for sn in task.get("SN", [])) or
                            any(search_lower in laq.lower() for laq in task.get("LAQ", [])))
             if not match_found:
                 continue
+
         task_deadline_str = task.get("Deadline")
         if task_deadline_str:
             try:
                 task_deadline = date.fromisoformat(task_deadline_str)
-                if start_date_filter and task_deadline < start_date_filter: continue
-                if end_date_filter and task_deadline > end_date_filter: continue
-            except ValueError: pass
+                if start_date_filter and task_deadline < start_date_filter:
+                    continue
+                if end_date_filter and task_deadline > end_date_filter:
+                    continue
+            except ValueError:
+                if start_date_filter or end_date_filter:
+                    continue
         elif start_date_filter or end_date_filter:
             continue
+
         filtered_tasks.append((i, task, st.session_state.task_checks[i], st.session_state.task_keys[i]))
     return filtered_tasks
 
@@ -562,15 +587,20 @@ def completion_overview_section():
         </a>""", unsafe_allow_html=True)
         st.progress(pct / 100)
 
-# --- EDIT FORM (No changes here) ---
+# --- EDIT FORM ---
 def display_edit_form(current_task_data, current_task_checks, current_key_fk):
     st.subheader(f"✏️ Editing: {current_task_data['Chapter']}")
     all_subjects_for_edit = sorted(list(st.session_state.all_subjects))
-    if current_task_data.get("Subject") not in all_subjects_for_edit:
-        all_subjects_for_edit.append(current_task_data.get("Subject", ""))
+    
+    if current_task_data.get("Subject") and current_task_data.get("Subject") not in all_subjects_for_edit:
+        all_subjects_for_edit.append(current_task_data["Subject"])
         all_subjects_for_edit.sort()
-    try: current_subject_index = all_subjects_for_edit.index(current_task_data.get("Subject", ""))
-    except ValueError: current_subject_index = 0
+    
+    try: 
+        current_subject_index = all_subjects_for_edit.index(current_task_data.get("Subject", ""))
+    except ValueError: 
+        current_subject_index = 0 if all_subjects_for_edit else 0
+    
     edited_subject = st.selectbox("Subject", all_subjects_for_edit, index=current_subject_index, key=f"edit_subject_{current_key_fk}")
     edited_chapter = st.text_input("Chapter", value=current_task_data.get("Chapter", ""), key=f"edit_chapter_{current_key_fk}")
     edited_sn = st.text_area("Short Notes (SN)", value="\n".join(current_task_data.get("SN", [])), key=f"edit_sn_{current_key_fk}")
@@ -595,18 +625,35 @@ def display_edit_form(current_task_data, current_task_checks, current_key_fk):
             else:
                 new_checks_sn = [False] * len(new_sn_list)
                 for i, sn_item in enumerate(new_sn_list):
-                    try: new_checks_sn[i] = current_task_checks["SN"][current_task_data["SN"].index(sn_item)]
-                    except (ValueError, KeyError, IndexError): pass
+                    try: 
+                        original_sn_index = current_task_data["SN"].index(sn_item)
+                        new_checks_sn[i] = current_task_checks["SN"][original_sn_index]
+                    except (ValueError, KeyError, IndexError): 
+                        pass
+                
                 new_checks_laq = [False] * len(new_laq_list)
                 for i, laq_item in enumerate(new_laq_list):
-                    try: new_checks_laq[i] = current_task_checks["LAQ"][current_task_data["LAQ"].index(laq_item)]
-                    except (ValueError, KeyError, IndexError): pass
-                updated_task = {"Subject": edited_subject.strip(), "Chapter": edited_chapter.strip(), "SN": new_sn_list, "LAQ": new_laq_list, "Priority": edited_priority, "Deadline": str(edited_deadline)}
+                    try: 
+                        original_laq_index = current_task_data["LAQ"].index(laq_item)
+                        new_checks_laq[i] = current_task_checks["LAQ"][original_laq_index]
+                    except (ValueError, KeyError, IndexError): 
+                        pass
+                
+                updated_task = {
+                    "Subject": edited_subject.strip(), 
+                    "Chapter": edited_chapter.strip(), 
+                    "SN": new_sn_list, 
+                    "LAQ": new_laq_list, 
+                    "Priority": edited_priority, 
+                    "Deadline": str(edited_deadline)
+                }
                 updated_checks = {"SN": new_checks_sn, "LAQ": new_checks_laq}
+                
                 with st.spinner("Saving changes..."):
                     if save_task(updated_task, updated_checks, key=current_key_fk):
                         st.cache_data.clear()
-                        st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, st.session_state.all_subjects = load_tasks()
+                        st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks()
+                        st.session_state.all_subjects.update(new_subjects)
                         st.session_state.editing_task_key = None
                         st.session_state.temp_edit_task_data = {}
                         st.success(f"Task '{updated_task['Chapter']}' updated successfully!", icon="✅")
@@ -646,6 +693,7 @@ def task_list_section():
         total_items = total_sn + total_laq
         sn_checked_count, laq_checked_count = sum(checks.get("SN", [])), sum(checks.get("LAQ", []))
         is_completed = (total_items > 0) and (sn_checked_count == total_sn) and (laq_checked_count == total_laq)
+        
         task_container_class = "task-item completed-task" if is_completed else "task-item"
         st.markdown(f'<div id="task-{key_fk}" class="{task_container_class}">', unsafe_allow_html=True)
 
@@ -666,7 +714,7 @@ def task_list_section():
                             if not checks["SN"][j]:
                                 checks["SN"][j] = True
                                 save_task(task, checks, key=key_fk)
-                                st.session_state.play_tick_sound = True # Set flag to play sound
+                                st.session_state.play_tick_sound = True
                                 st.rerun()
                         elif checks["SN"][j]:
                             checks["SN"][j] = False
@@ -680,7 +728,7 @@ def task_list_section():
                             if not checks["LAQ"][j]:
                                 checks["LAQ"][j] = True
                                 save_task(task, checks, key=key_fk)
-                                st.session_state.play_tick_sound = True # Set flag to play sound
+                                st.session_state.play_tick_sound = True
                                 st.rerun()
                         elif checks["LAQ"][j]:
                             checks["LAQ"][j] = False
@@ -700,14 +748,15 @@ def task_list_section():
 
         if st.session_state.get(f"show_confirm_{key_fk}", False):
             st.warning(f"Are you sure you want to delete chapter '{task['Chapter']}'?", icon="⚠️")
-            col_yes, col_no = st.columns([0.1, 1])
+            col_yes, col_no = st.columns([0.15, 1])
             with col_yes:
                 if st.button("Yes, Delete", key=f"confirm_del_yes_{key_fk}"):
                     with st.spinner(f"Deleting '{task['Chapter']}'..."):
                         if delete_task_from_db(key_fk):
                             st.session_state.last_deleted = (task, checks, key_fk)
                             st.cache_data.clear()
-                            st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, st.session_state.all_subjects = load_tasks()
+                            st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks()
+                            st.session_state.all_subjects.update(new_subjects)
                             st.success(f"Task '{task['Chapter']}' deleted successfully!", icon="✅")
                             st.session_state[f"show_confirm_{key_fk}"] = False
                             st.rerun()
@@ -720,7 +769,7 @@ def task_list_section():
         st.markdown('</div>', unsafe_allow_html=True)
         st.divider()
 
-# --- UNDO DELETE / EXPORT (No changes here) ---
+# --- UNDO DELETE / EXPORT ---
 def undo_delete_section():
     if "last_deleted" in st.session_state and st.session_state.last_deleted is not None:
         if st.button("↩️ Undo Last Delete", key="undo_delete_button"):
@@ -728,7 +777,8 @@ def undo_delete_section():
             with st.spinner("Restoring task..."):
                 if save_task(task_to_restore, checks_to_restore, key_to_restore):
                     st.cache_data.clear()
-                    st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, st.session_state.all_subjects = load_tasks()
+                    st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks()
+                    st.session_state.all_subjects.update(new_subjects)
                     st.session_state.last_deleted = None
                     st.success("Task restored successfully!", icon="✅")
                     st.rerun()
