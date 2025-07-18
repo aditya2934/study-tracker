@@ -1,6 +1,7 @@
+
 import streamlit as st
 import firebase_admin
-from firebase_admin import credentials, db, auth
+from firebase_admin import credentials, db, auth # Import auth for user management (optional for this simple example)
 from datetime import date
 import uuid
 import pandas as pd
@@ -9,7 +10,7 @@ import time
 import streamlit.components.v1 as components
 
 # --- CONFIGURATION (using Streamlit Secrets) ---
-DB_PATH_ROOT = "users"
+DB_PATH_ROOT = "users" # New root path for user-specific data
 
 # --- AUDIO ASSETS (URLs) ---
 POMODORO_FINISH_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
@@ -18,6 +19,7 @@ WHITE_NOISE_URL = "https://www.soundjay.com/nature/sounds/whitenoise-1.mp3"
 
 
 # --- FIREBASE ADMIN SDK INITIALIZATION (For server-side operations if needed) ---
+# @st.cache_resource ensures this function runs only once across reruns.
 @st.cache_resource(show_spinner="Initializing Firebase Admin SDK...")
 def initialize_firebase_admin_sdk():
     firebase_config = st.secrets.get("firebase")
@@ -86,6 +88,8 @@ if "auth_status" not in st.session_state:
     st.session_state.auth_status = "pending" # pending, logged_in, logged_out
 
 # --- Streamlit Components for Authentication (using custom HTML/JS) ---
+# This component handles the actual Firebase client-side authentication flow.
+# It now *returns* a value to Streamlit
 def firebase_auth_component():
     html_code = f"""
     <!DOCTYPE html>
@@ -95,86 +99,84 @@ def firebase_auth_component():
         <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
         <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
         <script>
-            // Your Firebase project configuration
             const firebaseConfig = {FIREBASE_CLIENT_CONFIG};
-
-            // Initialize Firebase
-            if (!firebase.apps.length) {{ /* Escaped curly braces */
-                firebase.initializeApp(firebaseConfig);
-            }} else {{ /* Escaped curly braces */
-                firebase.app(); // if already initialized, use that app
-            }}
+            if (!firebase.apps.length) {{ firebase.initializeApp(firebaseConfig); }} else {{ firebase.app(); }}
 
             const auth = firebase.auth();
             const provider = new firebase.auth.GoogleAuthProvider();
 
             // Function to send data back to Streamlit
-            function sendToStreamlit(type, data) {{ /* Escaped curly braces */
-                // Use Streamlit.setComponentValue to send data back.
-                // This is the correct way for components to communicate with Python.
-                if (window.streamlit && window.streamlit.setComponentValue) {{ /* Escaped curly braces */
-                    window.streamlit.setComponentValue({{"type": type, "data": data}}); /* Escaped curly braces */
-                }}
+            function sendToStreamlit(type, data) {{
+                window.parent.postMessage({{
+                    streamlit: {{
+                        eventType: 'streamlit:componentReady',
+                        data: {{ type: type, data: data }}
+                    }}
+                }}, '*');
             }}
 
-            auth.onAuthStateChanged(user => {{ /* Escaped curly braces */
-                if (user) {{ /* Escaped curly braces */
-                    // User is signed in.
-                    const userData = {{ /* Escaped curly braces */
+            auth.onAuthStateChanged(user => {{
+                if (user) {{
+                    sendToStreamlit('auth_success', {{
                         uid: user.uid,
                         email: user.email,
                         displayName: user.displayName
-                    }};
-                    sendToStreamlit('auth_success', userData);
-                }} else {{ /* Escaped curly braces */
-                    // User is signed out.
+                    }});
+                }} else {{
                     sendToStreamlit('auth_failure', null);
                 }}
             }});
 
-            window.signInWithGoogle = function() {{ /* Escaped curly braces */
+            window.signInWithGoogle = function() {{ // Make global for button click
                 auth.signInWithPopup(provider)
-                    .catch((error) => {{ /* Escaped curly braces */
+                    .catch((error) => {{
                         console.error("Auth error: ", error);
                         sendToStreamlit('auth_error', error.message);
                     }});
             }};
 
-            window.signOutUser = function() {{ /* Escaped curly braces */
+            window.signOutUser = function() {{ // Make global for button click
                 auth.signOut()
-                    .then(() => {{ /* Escaped curly braces */
+                    .then(() => {{
                         sendToStreamlit('auth_signed_out', null);
                     }})
-                    .catch((error) => {{ /* Escaped curly braces */
+                    .catch((error) => {{
                         console.error("Sign out error: ", error);
                         sendToStreamlit('auth_error', error.message);
                     }});
             }};
 
-            // Ensure Streamlit.setComponentValue is available before use
-            if (window.streamlit && window.streamlit.setComponentValue) {
-                // Initial state check after component loads and Firebase auth is ready
-                // This entire block needs curly braces escaped if it's within an f-string
-                const observer = new MutationObserver((mutationsList, observer) => {{ /* Escaped curly braces */
-                    if (document.readyState === 'complete') {{ /* Escaped curly braces */
-                        // Send initial state once the document is ready and Firebase auth is checked
-                        if (auth.currentUser) {{ /* Escaped curly braces */
-                             Streamlit.setComponentValue({{"type": "auth_success", "data": {{"uid": auth.currentUser.uid, "email": auth.currentUser.email, "displayName": auth.currentUser.displayName}}}}); /* Escaped curly braces */
-                        }} else {{ /* Escaped curly braces */
-                             Streamlit.setComponentValue({{"type": "auth_failure", "data": null}}); /* Escaped curly braces */
-                        }}
-                        observer.disconnect(); // Stop observing once sent
-                    }}
-                }});
-                observer.observe(document.body, {{ /* Escaped curly braces */ childList: true, subtree: true }}); /* Escaped curly braces */
-            }
+            // Initial state message (important for Streamlit to render correctly)
+            auth.onAuthStateChanged(user => {{
+                if (user) {{
+                    Streamlit.setComponentValue({{ type: 'auth_success', data: {{ uid: user.uid, email: user.email, displayName: user.displayName }} }});
+                }} else {{
+                    Streamlit.setComponentValue({{ type: 'auth_failure', data: null }});
+                }}
+            }});
 
+
+            // Streamlit.setComponentReady() is now the recommended way to send data back
+            // However, this setup often benefits from initial state setting.
+            // Let's set up a listener for initial component load if needed
+            const observer = new MutationObserver((mutationsList, observer) => {
+                if (document.readyState === 'complete') {
+                    // Send initial state once the document is ready and Firebase auth is checked
+                    if (auth.currentUser) {
+                         Streamlit.setComponentValue({ type: 'auth_success', data: { uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName } });
+                    } else {
+                         Streamlit.setComponentValue({ type: 'auth_failure', data: null });
+                    }
+                    observer.disconnect(); // Stop observing once sent
+                }
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
 
         </script>
         <style>
-            body {{ /* Escaped curly braces */ font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: transparent; }}
-            .auth-buttons {{ /* Escaped curly braces */ text-align: center; }}
-            .auth-buttons button {{ /* Escaped curly braces */
+            body {{ font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: transparent; }}
+            .auth-buttons {{ text-align: center; }}
+            .auth-buttons button {{
                 background-color: #4285F4; /* Google blue */
                 color: white;
                 padding: 10px 20px;
@@ -185,7 +187,7 @@ def firebase_auth_component():
                 margin: 5px;
                 transition: background-color 0.3s ease;
             }}
-            .auth-buttons button:hover {{ /* Escaped curly braces */ background-color: #357ae8; }}
+            .auth-buttons button:hover {{ background-color: #357ae8; }}
         </style>
     </head>
     <body>
@@ -196,20 +198,23 @@ def firebase_auth_component():
     </body>
     </html>
     """
+    # The return value of components.html is the data sent back via Streamlit.setComponentValue
+    # We set a key to ensure it re-renders.
     return components.html(html_code, height=100, scrolling=False, key="firebase_auth_ui_component")
 
 
 # --- Streamlit Message Listener (to get data from JavaScript component) ---
+# This block now uses the return value of components.html directly.
 auth_component_value = None
-if st.session_state.auth_status == "pending" or st.session_state.auth_status == "logged_out":
-    auth_component_value = firebase_auth_component()
+if st.session_state.auth_status == "pending":
+    auth_component_value = firebase_auth_component() # Render and get return value
 
-    if auth_component_value:
+    if auth_component_value: # If the component sent a message back
         if auth_component_value.get("type") == "auth_success":
             st.session_state.user_id = auth_component_value["data"]["uid"]
             st.session_state.user_email = auth_component_value["data"]["email"]
             st.session_state.auth_status = "logged_in"
-            st.rerun()
+            st.rerun() # Re-run to update UI to logged-in state
         elif auth_component_value.get("type") == "auth_failure":
             st.session_state.auth_status = "logged_out"
             st.session_state.user_id = None
@@ -295,6 +300,7 @@ def play_sound(sound_url: str, unique_key: str):
 
 
 # --- SESSION STATE INITIALIZATION for APP DATA (depends on user_id) ---
+# This block now runs ONLY if the user is logged in
 if st.session_state.user_id:
     if "tasks" not in st.session_state:
         st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, loaded_subjects = load_tasks_for_user(st.session_state.user_id)
@@ -747,6 +753,118 @@ if st.session_state.user_id:
         for i, task, checks, key_fk in filtered_tasks_data:
             sn_done, laq_done = sum(checks.get("SN", [])), sum(checks.get("LAQ", []))
             total_sn, total_laq = len(task.get("SN", [])), len(task.get("LAQ", []))
+            total_items, items_done = total_sn + total_laq, sn_done + laq_done
+            pct = int((items_done / total_items * 100)) if total_items else 0
+            st.markdown(f"""
+            <a href="#task-{key_fk}" style="text-decoration: none; color: inherit;">
+                <div style="cursor: pointer;">{task['Chapter']}: {pct}% done ({items_done}/{total_items})</div>
+            </a>""", unsafe_allow_html=True)
+            st.progress(pct / 100)
+
+    # --- EDIT FORM ---
+    def display_edit_form(current_task_data, current_task_checks, current_key_fk):
+        st.subheader(f"✏️ Editing: {current_task_data['Chapter']}")
+        all_subjects_for_edit = sorted(list(st.session_state.all_subjects))
+        
+        if current_task_data.get("Subject") and current_task_data.get("Subject") not in all_subjects_for_edit:
+            all_subjects_for_edit.append(current_task_data["Subject"])
+            all_subjects_for_edit.sort()
+        
+        try: 
+            current_subject_index = all_subjects_for_edit.index(current_task_data.get("Subject", ""))
+        except ValueError: 
+            current_subject_index = 0 if all_subjects_for_edit else 0
+        
+        edited_subject = st.selectbox("Subject", all_subjects_for_edit, index=current_subject_index, key=f"edit_subject_{current_key_fk}")
+        edited_chapter = st.text_input("Chapter", value=current_task_data.get("Chapter", ""), key=f"edit_chapter_{current_key_fk}")
+        edited_sn = st.text_area("Short Notes (SN)", value="\n".join(current_task_data.get("SN", [])), key=f"edit_sn_{current_key_fk}")
+        edited_laq = st.text_area("Long Answer Questions (LAQ)", value="\n".join(current_task_data.get("LAQ", [])), key=f"edit_laq_{current_key_fk}")
+        priority_options = ["High", "Medium", "Low"]
+        try: current_priority_index = priority_options.index(current_task_data.get("Priority", "Medium"))
+        except ValueError: current_priority_index = 1
+        edited_priority = st.selectbox("Priority", priority_options, index=current_priority_index, key=f"edit_priority_{current_key_fk}")
+        try: current_deadline_date_obj = date.fromisoformat(current_task_data.get("Deadline", str(date.today())))
+        except ValueError: current_deadline_date_obj = date.today()
+        initial_deadline_value = max(current_deadline_date_obj, date.today())
+        edited_deadline = st.date_input("Deadline", value=initial_deadline_value, min_value=date.today(), key=f"edit_deadline_{current_key_fk}")
+        col_save, col_cancel = st.columns([0.15, 1])
+        with col_save:
+            if st.button("💾 Save Changes", key=f"save_edit_{current_key_fk}"):
+                new_sn_list = [l.strip() for l in edited_sn.splitlines() if l.strip()]
+                new_laq_list = [l.strip() for l in edited_laq.splitlines() if l.strip()]
+                if not edited_chapter.strip():
+                    st.error("Chapter cannot be empty.", icon="❌")
+                elif not new_sn_list and not new_laq_list:
+                    st.error("At least one Short Note or Long Answer Question is required.", icon="❌")
+                else:
+                    new_checks_sn = [False] * len(new_sn_list)
+                    for i, sn_item in enumerate(new_sn_list):
+                        try: 
+                            original_sn_index = current_task_data["SN"].index(sn_item)
+                            new_checks_sn[i] = current_task_checks["SN"][original_sn_index]
+                        except (ValueError, KeyError, IndexError): 
+                            pass
+                    
+                    new_checks_laq = [False] * len(new_laq_list)
+                    for i, laq_item in enumerate(new_laq_list):
+                        try: 
+                            original_laq_index = current_task_data["LAQ"].index(laq_item)
+                            new_checks_laq[i] = current_task_checks["LAQ"][original_laq_index]
+                        except (ValueError, KeyError, IndexError): 
+                            pass
+                    
+                    updated_task = {
+                        "Subject": edited_subject.strip(), 
+                        "Chapter": edited_chapter.strip(), 
+                        "SN": new_sn_list, 
+                        "LAQ": new_laq_list, 
+                        "Priority": edited_priority, 
+                        "Deadline": str(edited_deadline)
+                    }
+                    updated_checks = {"SN": new_checks_sn, "LAQ": new_checks_laq}
+                    
+                    with st.spinner("Saving changes..."):
+                        key_saved = save_task_for_user(st.session_state.user_id, updated_task, updated_checks, key=current_key_fk)
+                        if key_saved:
+                            st.cache_data.clear()
+                            st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks_for_user(st.session_state.user_id)
+                            st.session_state.all_subjects.update(new_subjects)
+                            st.session_state.editing_task_key = None
+                            st.session_state.temp_edit_task_data = {}
+                            st.success(f"Task '{updated_task['Chapter']}' updated successfully!", icon="✅")
+                            st.rerun()
+                        else: st.error("Failed to save changes. Please try again.", icon="❌")
+        with col_cancel:
+            if st.button("❌ Cancel Edit", key=f"cancel_edit_{current_key_fk}"):
+                st.session_state.editing_task_key = None
+                st.session_state.temp_edit_task_data = {}
+                st.rerun()
+
+    # --- Display Task List (with Tick Sound) ---
+    def task_list_section():
+        st.header("🗂️ Task List")
+
+        if st.session_state.selected_view_subject is None:
+            st.info("No subjects to display tasks.")
+            return
+
+        filtered_tasks_data = get_filtered_tasks()
+
+        if not filtered_tasks_data:
+            st.info(f"No tasks found for the selected subject and current filters/search query.")
+            return
+
+        def sort_key_func(item):
+            task = item[1]
+            try: deadline = date.fromisoformat(task.get("Deadline", "9999-12-31"))
+            except ValueError: deadline = date.max
+            priority = {"High": 0, "Medium": 1, "Low": 2}.get(task.get("Priority", "Medium"), 1)
+            return (deadline, priority)
+
+        filtered_tasks_data.sort(key=sort_key_func)
+
+        for original_idx, task, checks, key_fk in filtered_tasks_data:
+            total_sn, total_laq = len(task.get("SN", [])), len(task.get("LAQ", []))
             total_items = total_sn + total_laq
             sn_checked_count, laq_checked_count = sum(checks.get("SN", [])), sum(checks.get("LAQ", []))
             is_completed = (total_items > 0) and (sn_checked_count == total_sn) and (laq_checked_count == total_laq)
@@ -817,7 +935,7 @@ if st.session_state.user_id:
                                 st.success(f"Task '{task['Chapter']}' deleted successfully!", icon="✅")
                                 st.session_state[f"show_confirm_{key_fk}"] = False
                                 st.rerun()
-                            else: st.error("Failed to delete. Please try again.", icon="❌")
+                            else: st.error(f"Failed to delete '{task['Chapter']}'. Please try again.", icon="❌")
                 with col_no:
                     if st.button("No, Cancel", key=f"confirm_del_no_{key_fk}"):
                         st.session_state[f"show_confirm_{key_fk}"] = False
@@ -862,12 +980,15 @@ if st.session_state.user_id:
     if st.session_state.auth_status == "logged_in":
         st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
         if st.sidebar.button("Log Out"):
+            # Send message to JS component to trigger logout
             js_code = """
             <script>
                 window.signOutUser();
             </script>
             """
             components.html(js_code, height=0)
+            # st.session_state.auth_status = "pending" # Will be set by JS callback
+            # st.rerun() # Will be triggered by JS callback
 
         st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
 
@@ -888,23 +1009,26 @@ if st.session_state.user_id:
     elif st.session_state.auth_status == "logged_out":
         st.warning("Please log in to use the Study Tracker.")
         if st.button("Sign in with Google"):
+            # Send message to JS component to trigger login
             js_code = """
             <script>
                 window.signInWithGoogle();
             </script>
             """
             components.html(js_code, height=0)
+            # st.session_state.auth_status will be updated by JS callback
 
     else: # auth_status == "pending"
         st.info("Checking authentication status...")
-        auth_return_value = firebase_auth_component()
+        # The key is crucial to ensure Streamlit knows to receive data from this specific component
+        auth_return_value = firebase_auth_component() # This is where the JS sends data back
 
-        if auth_return_value:
+        if auth_return_value: # If the component sent a message back
             if auth_return_value.get("type") == "auth_success":
                 st.session_state.user_id = auth_return_value["data"]["uid"]
                 st.session_state.user_email = auth_return_value["data"]["email"]
                 st.session_state.auth_status = "logged_in"
-                st.rerun()
+                st.rerun() # Re-run to update UI to logged-in state
             elif auth_return_value.get("type") == "auth_failure":
                 st.session_state.auth_status = "logged_out"
                 st.session_state.user_id = None
