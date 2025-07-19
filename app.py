@@ -87,6 +87,8 @@ if "auth_status" not in st.session_state:
     st.session_state.auth_status = "pending" # pending, logged_in, logged_out
 
 # --- Streamlit Components for Authentication (using custom HTML/JS) ---
+# This component handles the actual Firebase client-side authentication flow.
+# It now *returns* a value to Streamlit
 def firebase_auth_component():
     html_code = f"""
     <!DOCTYPE html>
@@ -102,15 +104,16 @@ def firebase_auth_component():
             const auth = firebase.auth();
             const provider = new firebase.auth.GoogleAuthProvider();
 
-            // Function to send data back to Streamlit
+            // Function to send data back to Streamlit using Streamlit.setComponentValue
             function sendAuthStatusToStreamlit(type, data) {{
                 if (window.Streamlit) {{ // Ensure Streamlit object is available
                     Streamlit.setComponentValue({{ type: type, data: data }});
                 }} else {{
-                    console.error("Streamlit object not found.");
+                    console.error("Streamlit object not found. Cannot send data.");
                 }}
             }}
 
+            // Listen for auth state changes and send to Streamlit
             auth.onAuthStateChanged(user => {{
                 if (user) {{
                     sendAuthStatusToStreamlit('auth_success', {{
@@ -142,17 +145,20 @@ def firebase_auth_component():
                     }});
             }};
 
-            // This ensures that Streamlit component is ready to receive data,
-            // and an initial state is sent.
+            // This is crucial: Send an initial state after the component is ready
+            // and Firebase has had a chance to check auth state.
             document.addEventListener('DOMContentLoaded', function() {{
-                if (window.Streamlit) {{ // Check if Streamlit is defined
-                    if (auth.currentUser) {{
-                        sendAuthStatusToStreamlit('auth_success', {{ uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName }});
-                    }} else {{
-                        sendAuthStatusToStreamlit('auth_failure', null);
+                // A small delay can sometimes help ensure Firebase has initialized
+                setTimeout(() => {{
+                    if (window.Streamlit) {{
+                        if (auth.currentUser) {{
+                            sendAuthStatusToStreamlit('auth_success', {{ uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName }});
+                        }} else {{
+                            sendAuthStatusToStreamlit('auth_failure', null);
+                        }}
+                        Streamlit.setComponentReady(); // Indicate component is fully loaded and ready to receive/send
                     }}
-                    Streamlit.setComponentReady(); // Indicate component is ready
-                }}
+                }}, 100); // Small delay
             }});
 
         </script>
@@ -181,10 +187,13 @@ def firebase_auth_component():
     </body>
     </html>
     """
+    # The return value of components.html is the data sent back via Streamlit.setComponentValue
+    # We set a key to ensure it re-renders.
     return components.html(html_code, height=100, scrolling=False, key="firebase_auth_ui_component")
 
 
 # --- Streamlit Message Listener (to get data from JavaScript component) ---
+# This block now uses the return value of components.html directly.
 auth_component_value = None
 if st.session_state.auth_status == "pending":
     auth_component_value = firebase_auth_component() # Render and get return value
@@ -554,7 +563,7 @@ if st.session_state.user_id:
             with col_edit1:
                 st.number_input("Work Time", min_value=1, max_value=120, value=st.session_state.pomodoro_work_mins, key="pomodoro_work_mins", on_change=update_timer_duration_on_edit)
             with col_edit2:
-                st.number_input("Short Break", min_value=1, max_value=30, value=st.session_state.pomodoro_break_mins, key="pomodoro_break_mins", on_change=update_timer_duration_on_edit)
+                st.number_input("Short Break", min_value=1, max_value=30, value=st.session_state.pomodoro_break_mins, key="pomodoro_break_mins", on_change=update_timer_duration_on_change)
             with col_edit3:
                 st.number_input("Long Break", min_value=1, max_value=60, value=st.session_state.pomodoro_long_break_mins, key="pomodoro_long_break_mins", on_change=update_timer_duration_on_edit)
         
@@ -985,15 +994,23 @@ if st.session_state.user_id:
 
     elif st.session_state.auth_status == "logged_out":
         st.warning("Please log in to use the Study Tracker.")
-        if st.button("Sign in with Google"):
-            # Send message to JS component to trigger login
-            js_code = """
-            <script>
-                window.signInWithGoogle();
-            </script>
-            """
-            components.html(js_code, height=0)
-            # st.session_state.auth_status will be updated by JS callback
+        # Render the auth component to show the login button
+        auth_return_value = firebase_auth_component()
+        if auth_return_value: # If the component sent a message back
+            if auth_return_value.get("type") == "auth_success":
+                st.session_state.user_id = auth_return_value["data"]["uid"]
+                st.session_state.user_email = auth_return_value["data"]["email"]
+                st.session_state.auth_status = "logged_in"
+                st.rerun()
+            elif auth_return_value.get("type") == "auth_signed_out":
+                st.session_state.auth_status = "logged_out" # Already logged out, but good for clarity
+                st.session_state.user_id = None
+                st.session_state.user_email = None
+                st.rerun()
+            elif auth_return_value.get("type") == "auth_error":
+                st.error(f"Authentication Error: {auth_return_value['data']}", icon="❌")
+                st.session_state.auth_status = "logged_out"
+                st.rerun()
 
     else: # auth_status == "pending"
         st.info("Checking authentication status...")
