@@ -67,16 +67,15 @@ initialize_firebase_admin_sdk()
 
 
 # --- CLIENT-SIDE FIREBASE SDK CONFIG (for Authentication in JavaScript) ---
-# FIX: Changed to access client-side keys from st.secrets["firebase"] instead of st.secrets["firebase_client"]
 FIREBASE_CLIENT_CONFIG = json.dumps({
-    "apiKey": st.secrets["firebase"]["api_key"],
-    "authDomain": st.secrets["firebase"]["auth_domain"],
-    "projectId": st.secrets["firebase"]["project_id"],
-    "databaseURL": st.secrets["firebase"]["database_url"],
-    "storageBucket": st.secrets["firebase"]["storage_bucket"],
-    "messagingSenderId": st.secrets["firebase"]["messaging_sender_id"],
-    "appId": st.secrets["firebase"]["app_id"],
-    "measurementId": st.secrets["firebase"].get("measurement_id", "") # Optional
+    "apiKey": st.secrets["firebase_client"]["api_key"],
+    "authDomain": st.secrets["firebase_client"]["auth_domain"],
+    "projectId": st.secrets["firebase_client"]["project_id"],
+    "databaseURL": st.secrets["firebase_client"]["database_url"],
+    "storageBucket": st.secrets["firebase_client"]["storage_bucket"],
+    "messagingSenderId": st.secrets["firebase_client"]["messaging_sender_id"],
+    "appId": st.secrets["firebase_client"]["app_id"],
+    "measurementId": st.secrets["firebase_client"].get("measurement_id", "") # Optional
 })
 
 # --- SESSION STATE INITIALIZATION FOR AUTHENTICATION ---
@@ -88,8 +87,6 @@ if "auth_status" not in st.session_state:
     st.session_state.auth_status = "pending" # pending, logged_in, logged_out
 
 # --- Streamlit Components for Authentication (using custom HTML/JS) ---
-# This component handles the actual Firebase client-side authentication flow.
-# It now *returns* a value to Streamlit
 def firebase_auth_component():
     html_code = f"""
     <!DOCTYPE html>
@@ -106,24 +103,23 @@ def firebase_auth_component():
             const provider = new firebase.auth.GoogleAuthProvider();
 
             // Function to send data back to Streamlit
-            function sendToStreamlit(type, data) {{
-                window.parent.postMessage({{
-                    streamlit: {{
-                        eventType: 'streamlit:componentReady',
-                        data: {{ type: type, data: data }}
-                    }}
-                }}, '*');
+            function sendAuthStatusToStreamlit(type, data) {{
+                if (window.Streamlit) {{ // Ensure Streamlit object is available
+                    Streamlit.setComponentValue({{ type: type, data: data }});
+                }} else {{
+                    console.error("Streamlit object not found.");
+                }}
             }}
 
             auth.onAuthStateChanged(user => {{
                 if (user) {{
-                    sendToStreamlit('auth_success', {{
+                    sendAuthStatusToStreamlit('auth_success', {{
                         uid: user.uid,
                         email: user.email,
                         displayName: user.displayName
                     }});
                 }} else {{
-                    sendToStreamlit('auth_failure', null);
+                    sendAuthStatusToStreamlit('auth_failure', null);
                 }}
             }});
 
@@ -131,46 +127,33 @@ def firebase_auth_component():
                 auth.signInWithPopup(provider)
                     .catch((error) => {{
                         console.error("Auth error: ", error);
-                        sendToStreamlit('auth_error', error.message);
+                        sendAuthStatusToStreamlit('auth_error', error.message);
                     }});
             }};
 
             window.signOutUser = function() {{ // Make global for button click
                 auth.signOut()
                     .then(() => {{
-                        sendToStreamlit('auth_signed_out', null);
+                        sendAuthStatusToStreamlit('auth_signed_out', null);
                     }})
                     .catch((error) => {{
                         console.error("Sign out error: ", error);
-                        sendToStreamlit('auth_error', error.message);
+                        sendAuthStatusToStreamlit('auth_error', error.message);
                     }});
             }};
 
-            // Initial state message (important for Streamlit to render correctly)
-            auth.onAuthStateChanged(user => {{
-                if (user) {{
-                    Streamlit.setComponentValue({{ type: 'auth_success', data: {{ uid: user.uid, email: user.email, displayName: user.displayName }} }});
-                }} else {{
-                    Streamlit.setComponentValue({{ type: 'auth_failure', data: null }});
-                }}
-            }});
-
-
-            // Streamlit.setComponentReady() is now the recommended way to send data back
-            // However, this setup often benefits from initial state setting.
-            // Let's set up a listener for initial component load if needed
-            const observer = new MutationObserver((mutationsList, observer) => {{
-                if (document.readyState === 'complete') {{
-                    // Send initial state once the document is ready and Firebase auth is checked
+            // This ensures that Streamlit component is ready to receive data,
+            // and an initial state is sent.
+            document.addEventListener('DOMContentLoaded', function() {{
+                if (window.Streamlit) {{ // Check if Streamlit is defined
                     if (auth.currentUser) {{
-                         Streamlit.setComponentValue({{ type: 'auth_success', data: {{ uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName }} }});
+                        sendAuthStatusToStreamlit('auth_success', {{ uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName }});
                     }} else {{
-                         Streamlit.setComponentValue({{ type: 'auth_failure', data: null }});
+                        sendAuthStatusToStreamlit('auth_failure', null);
                     }}
-                    observer.disconnect(); // Stop observing once sent
+                    Streamlit.setComponentReady(); // Indicate component is ready
                 }}
             }});
-            observer.observe(document.body, {{ childList: true, subtree: true }});
 
         </script>
         <style>
@@ -198,13 +181,10 @@ def firebase_auth_component():
     </body>
     </html>
     """
-    # The return value of components.html is the data sent back via Streamlit.setComponentValue
-    # We set a key to ensure it re-renders.
     return components.html(html_code, height=100, scrolling=False, key="firebase_auth_ui_component")
 
 
 # --- Streamlit Message Listener (to get data from JavaScript component) ---
-# This block now uses the return value of components.html directly.
 auth_component_value = None
 if st.session_state.auth_status == "pending":
     auth_component_value = firebase_auth_component() # Render and get return value
@@ -574,7 +554,7 @@ if st.session_state.user_id:
             with col_edit1:
                 st.number_input("Work Time", min_value=1, max_value=120, value=st.session_state.pomodoro_work_mins, key="pomodoro_work_mins", on_change=update_timer_duration_on_edit)
             with col_edit2:
-                st.number_input("Short Break", min_value=1, max_value=30, value=st.session_state.pomodoro_break_mins, key="pomodoro_break_mins", on_change=update_timer_duration_on_change)
+                st.number_input("Short Break", min_value=1, max_value=30, value=st.session_state.pomodoro_break_mins, key="pomodoro_break_mins", on_change=update_timer_duration_on_edit)
             with col_edit3:
                 st.number_input("Long Break", min_value=1, max_value=60, value=st.session_state.pomodoro_long_break_mins, key="pomodoro_long_break_mins", on_change=update_timer_duration_on_edit)
         
@@ -929,7 +909,7 @@ if st.session_state.user_id:
                                 st.cache_data.clear()
                                 st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks_for_user(st.session_state.user_id)
                                 st.session_state.all_subjects.update(new_subjects)
-                                st.success("Task deleted successfully!", icon="✅") # Changed message to reflect delete
+                                st.success("Task restored successfully!", icon="✅")
                                 st.session_state[f"show_confirm_{key_fk}"] = False
                                 st.rerun()
                             else: st.error(f"Failed to delete '{task['Chapter']}'. Please try again.", icon="❌")
