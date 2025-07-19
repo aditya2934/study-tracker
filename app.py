@@ -106,14 +106,18 @@ def firebase_auth_component():
 
             // Function to send data back to Streamlit
             function sendToStreamlit(type, data) {{
-                window.parent.postMessage({{
-                    streamlit: {{
-                        eventType: 'streamlit:componentReady',
-                        data: {{ type: type, data: data }}
-                    }}
-                }}, '*');
+                // FIX: Check if Streamlit object is defined before calling its methods
+                if (typeof Streamlit !== 'undefined' && Streamlit.setComponentValue) {{
+                    Streamlit.setComponentValue({{ type: type, data: data }});
+                }} else {{
+                    console.warn("Streamlit API not ready or not found, cannot send component value.");
+                    // In a redirect flow, this might not be needed as Streamlit will re-render
+                    // and then pick up auth state from onAuthStateChanged on subsequent loads.
+                }}
             }}
-
+            
+            // Set up auth state change listener to send data back
+            // This will fire on initial page load and after redirects
             auth.onAuthStateChanged(user => {{
                 if (user) {{
                     sendToStreamlit('auth_success', {{
@@ -127,7 +131,8 @@ def firebase_auth_component():
             }});
 
             window.signInWithGoogle = function() {{ // Make global for button click
-                auth.signInWithPopup(provider)
+                // FIX: Use signInWithRedirect instead of signInWithPopup due to iframe restrictions
+                auth.signInWithRedirect(provider)
                     .catch((error) => {{
                         console.error("Auth error: ", error);
                         sendToStreamlit('auth_error', error.message);
@@ -145,31 +150,9 @@ def firebase_auth_component():
                     }});
             }};
 
-            // Initial state message (important for Streamlit to render correctly)
-            auth.onAuthStateChanged(user => {{
-                if (user) {{
-                    Streamlit.setComponentValue({{ type: 'auth_success', data: {{ uid: user.uid, email: user.email, displayName: user.displayName }} }});
-                }} else {{
-                    Streamlit.setComponentValue({{ type: 'auth_failure', data: null }});
-                }}
-            }});
-
-
-            // Streamlit.setComponentReady() is now the recommended way to send data back
-            // However, this setup often benefits from initial state setting.
-            // Let's set up a listener for initial component load if needed
-            const observer = new MutationObserver((mutationsList, observer) => {{
-                if (document.readyState === 'complete') {{
-                    // Send initial state once the document is ready and Firebase auth is checked
-                    if (auth.currentUser) {{
-                         Streamlit.setComponentValue({{ type: 'auth_success', data: {{ uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName }} }});
-                    }} else {{
-                         Streamlit.setComponentValue({{ type: 'auth_failure', data: null }});
-                    }}
-                    observer.disconnect(); // Stop observing once sent
-                }}
-            }});
-            observer.observe(document.body, {{ childList: true, subtree: true }});
+            // FIX: Removed the MutationObserver block
+            // The MutationObserver was causing a TypeError and is less critical for auth state
+            // since onAuthStateChanged handles the initial status after redirects.
 
         </script>
         <style>
@@ -197,30 +180,80 @@ def firebase_auth_component():
     </body>
     </html>
     """
-    # FIX: Removed the 'key' argument as it's not supported by components.html
+    # Removed the 'key' argument previously
     return components.html(html_code, height=100, scrolling=False)
 
 
-# --- Streamlit Message Listener (to get data from JavaScript component) ---
-# This block now uses the return value of components.html directly.
-# auth_component_value = None # This line is no longer needed at the top level
+# --- Functions to interact with Firebase Realtime Database (USER SPECIFIC) ---
+@st.cache_data(ttl=300, show_spinner="Loading your study tasks...")
+def load_tasks_for_user(user_id):
+    if not user_id:
+        return [], [], [], set()
+    try:
+        ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
+        data = ref.get()
+        if not data:
+            return [], [], [], set()
 
-if st.session_state.auth_status == "logged_in":
-    st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
-    if st.sidebar.button("Log Out"):
-        # Send message to JS component to trigger logout
-        js_code = """
-        <script>
-            window.signOutUser();
-        </script>
-        """
-        components.html(js_code, height=0)
-        # st.session_state.auth_status will be updated by JS callback
+        tasks_list = []
+        checks_list = []
+        keys_list = []
+        subjects_set = set()
 
-    st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
+        for key, value in data.items():
+            task = value.get("task", {})
+            check = value.get("check", {})
+            tasks_list.append(task)
+            checks_list.append(check)
+            keys_list.append(key)
+            if "Subject" in task:
+                subjects_set.add(task["Subject"])
 
-    # --- SESSION STATE INITIALIZATION for APP DATA (depends on user_id) ---
-    # Moved this block inside 'logged_in' check to ensure user_id is set
+        return tasks_list, checks_list, keys_list, subjects_set
+    except Exception as e:
+        st.error(f"Error loading tasks from Firebase: {e}", icon="❌")
+        return [], [], [], set()
+
+def save_task_for_user(user_id, task, check, key=None):
+    if not user_id:
+        st.warning("Cannot save task: No user logged in.")
+        return None
+    try:
+        ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
+        if not key:
+            key = str(uuid.uuid4())
+        ref.child(key).set({"task": task, "check": check})
+        return key
+    except Exception as e:
+        st.error(f"Error saving task to Firebase: {e}", icon="❌")
+        return None
+
+def delete_task_from_db_for_user(user_id, key):
+    if not user_id:
+        st.warning("Cannot delete task: No user logged in.")
+        return False
+    try:
+        db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks").child(key).delete()
+        return True
+    except Exception as e:
+        st.error(f"Error deleting task from Firebase: {e}", icon="❌")
+        return False
+
+# --- AUDIO PLAYBACK FUNCTION ---
+def play_sound(sound_url: str, unique_key: str):
+    """Embeds an HTML audio player that plays automatically."""
+    audio_html = f"""
+    <audio autoplay style="display:none;" key="{unique_key}">
+      <source src="{sound_url}" type="audio/mpeg">
+      Your browser does not support the audio element.
+    </audio>
+    """
+    components.html(audio_html, height=0)
+
+
+# --- SESSION STATE INITIALIZATION for APP DATA (depends on user_id) ---
+# This block now runs ONLY if the user is logged in
+if st.session_state.user_id:
     if "tasks" not in st.session_state:
         st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, loaded_subjects = load_tasks_for_user(st.session_state.user_id)
         st.session_state.all_subjects = loaded_subjects
@@ -910,7 +943,7 @@ else: # auth_status == "pending"
     auth_return_value = firebase_auth_component()
 
     # FIX: Add a robust check to ensure auth_return_value is a dictionary
-    # and contains 'type' before trying to access it. 
+    # and contains 'type' before trying to access it.
     if isinstance(auth_return_value, dict) and "type" in auth_return_value:
         if auth_return_value.get("type") == "auth_success":
             st.session_state.user_id = auth_return_value["data"]["uid"]
