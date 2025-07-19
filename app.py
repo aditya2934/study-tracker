@@ -1,4 +1,6 @@
 import streamlit as st
+st.write("Redirect URI:", st.secrets.get("google_oauth", {}).get("redirect_uri", "🚫 Not Found"))
+import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, db, auth
 from datetime import date
