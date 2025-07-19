@@ -12,14 +12,16 @@ import streamlit.components.v1 as components
 from streamlit_google_auth import Authenticate
 
 # --- CONFIGURATION (using Streamlit Secrets) ---
-DB_PATH_ROOT = "users"
+DB_PATH_ROOT = "users" # New root path for user-specific data
 
 # --- AUDIO ASSETS (URLs) ---
 POMODORO_FINISH_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
 TASK_TICK_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-48.mp3"
 WHITE_NOISE_URL = "https://www.soundjay.com/nature/sounds/whitenoise-1.mp3"
 
-# --- FIREBASE ADMIN SDK INITIALIZATION (For server-side operations) ---
+
+# --- FIREBASE ADMIN SDK INITIALIZATION (For server-side operations if needed) ---
+# @st.cache_resource ensures this function runs only once across reruns.
 @st.cache_resource(show_spinner="Initializing Firebase Admin SDK...")
 def initialize_firebase_admin_sdk():
     firebase_config = st.secrets.get("firebase")
@@ -68,10 +70,8 @@ initialize_firebase_admin_sdk()
 
 
 # --- CLIENT-SIDE FIREBASE SDK CONFIG (for Authentication in JavaScript) ---
-# NOTE: This block is now primarily for client-side Firebase API calls if needed,
-# but the core Google Auth will be handled by streamlit_google_auth.
-# Keep this as it is for now, as you might use `firebase.auth()` client-side later
-# for other Firebase features, but the primary auth init moves to `streamlit_google_auth`.
+# This block is for client-side Firebase API calls if needed (e.g., Realtime DB directly from JS)
+# The core Google Auth will now be handled by streamlit_google_auth.
 FIREBASE_CLIENT_CONFIG = json.dumps({
     "apiKey": st.secrets["firebase_client"]["api_key"],
     "authDomain": st.secrets["firebase_client"]["auth_domain"],
@@ -85,36 +85,50 @@ FIREBASE_CLIENT_CONFIG = json.dumps({
 
 
 # --- Authentication Handler using streamlit-google-auth ---
-# You'll replace the custom firebase_auth_component with this.
-auth_status = Authenticate(
-    client_id=st.secrets["google_oauth"]["client_id"],
-    client_secret=st.secrets["google_oauth"]["client_secret"],
-    # The redirect_uri must match what you configured in Google Cloud Console
-    # For Streamlit Cloud: "https://<your-app-name>.streamlit.app"
-    # For local: "http://localhost:8501"
-    # It might also need an explicit path if the component uses one,
-    # e.g., "https://<your-app-name>.streamlit.app/component/streamlit-google-auth"
-    # Check streamlit-google-auth documentation for exact redirect URI needs.
-    redirect_uri=st.secrets["google_oauth"].get("redirect_uri", "http://localhost:8501")
-    # You might pass st.session_state for state management if the component allows
-    # or relies on it, consult its documentation.
-)
+try:
+    google_client_id = st.secrets["google_oauth"]["client_id"]
+    google_client_secret = st.secrets["google_oauth"]["client_secret"]
+    google_redirect_uri = st.secrets["google_oauth"]["redirect_uri"]
 
-# Call the auth component to handle login/logout/state
-# This will render the login button if not authenticated
-# and update the component's internal state
-user_info = auth_status.st_auth()
+    auth_status = Authenticate(
+        client_id=google_client_id,
+        client_secret=google_client_secret,
+        redirect_uri=google_redirect_uri
+    )
 
+    # Call the auth component to handle login/logout/state
+    # This will render the login button if not authenticated
+    user_info = auth_status.st_auth()
 
-# --- SESSION STATE INITIALIZATION FOR APP DATA (Conditional based on user_info from new component) ---
-# This block runs if the user is successfully authenticated
+except KeyError as ke:
+    st.error(f"Missing Google OAuth secret key: `{ke}`. Please ensure `client_id`, `client_secret`, and `redirect_uri` are correctly set under `[google_oauth]` in your Streamlit Cloud secrets and `secrets.toml`.", icon="❌")
+    st.stop()
+except Exception as e:
+    st.error(f"Error initializing Google Authenticate component: {e}. Check `streamlit-google-auth` documentation and your secrets configuration.", icon="❌")
+    st.stop()
+
+# --- SESSION STATE INITIALIZATION FOR AUTHENTICATION (Initial setup for user_id/email) ---
+# Removed the old user_id/user_email/auth_status pending initializations
+# as they will be directly managed by the new component's output `user_info`.
+# If `user_info` is present, the user is logged in. If None, they are not.
+
+# --- Now, manage the app flow based on `user_info` provided by the Authenticate component ---
 if user_info:
+    # If user_info is available, the user is logged in
     st.session_state.auth_status = "logged_in"
-    st.session_state.user_id = user_info['id'] # Get UID from the component's returned info
-    st.session_state.user_email = user_info['email'] # Get email
-    st.session_state.user_name = user_info['name'] # Get display name
+    st.session_state.user_id = user_info.get('id')  # 'id' is typically the UID
+    st.session_state.user_email = user_info.get('email')
+    st.session_state.user_name = user_info.get('name') # Get display name if available
 
-    # Remaining session state initializations that depend on user_id
+    st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
+    if st.sidebar.button("Log Out"):
+        auth_status.logout() # Use the component's logout method
+        # st.rerun() is handled by the component's logout or subsequent script rerun
+
+    st.success(f"Welcome, {st.session_state.user_name or st.session_state.user_email}!", icon="👋")
+
+    # --- SESSION STATE INITIALIZATION for APP DATA (depends on user_id) ---
+    # This block now runs ONLY if the user is logged in
     if "tasks" not in st.session_state:
         st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, loaded_subjects = load_tasks_for_user(st.session_state.user_id)
         st.session_state.all_subjects = loaded_subjects
@@ -786,47 +800,14 @@ if user_info:
         else: st.info("No tasks to export for the selected subject.")
 
 
-elif st.session_state.auth_status == "logged_out":
+else: # User is not logged in (either 'logged_out' or 'pending')
+    st.session_state.auth_status = "logged_out" # Explicitly set to logged_out if not authenticated
+
     st.warning("Please log in to use the Study Tracker.")
-    if st.button("Sign in with Google"):
-        # Send message to JS component to trigger login
-        js_code = """
-        <script>
-            window.signInWithGoogle();
-        </script>
-        """
-        components.html(js_code, height=0)
-        # st.session_state.auth_status will be updated by JS callback
+    # The `auth_status.st_auth()` call above would have already rendered the login button.
+    # No need for a separate `st.button("Sign in with Google")` here.
+    # The `streamlit_google_auth` component handles rendering its own login UI.
 
-else: # auth_status == "pending"
-    st.info("Checking authentication status...")
-    # This is where the JS sends data back.
-    auth_return_value = firebase_auth_component()
-
-    # FIX: Add a robust check to ensure auth_return_value is a dictionary
-    # and contains 'type' before trying to access it.
-    if isinstance(auth_return_value, dict) and "type" in auth_return_value:
-        if auth_return_value.get("type") == "auth_success":
-            st.session_state.user_id = auth_return_value["data"]["uid"]
-            st.session_state.user_email = auth_return_value["data"]["email"]
-            st.session_state.auth_status = "logged_in"
-            st.rerun() # Re-run to update UI to logged-in state
-        elif auth_return_value.get("type") == "auth_failure":
-            st.session_state.auth_status = "logged_out"
-            st.session_state.user_id = None
-            st.session_state.user_email = None
-            st.rerun()
-        elif auth_return_value.get("type") == "auth_error":
-            st.session_state.auth_status = "logged_out"
-            st.session_state.user_id = None
-            st.session_state.user_email = None
-            st.error(f"Authentication Error: {auth_return_value['data']}", icon="❌")
-            st.rerun()
-        elif auth_return_value.get("type") == "auth_signed_out":
-            st.session_state.auth_status = "logged_out"
-            st.session_state.user_id = None
-            st.session_state.user_email = None
-            st.rerun()
-    # No `else` needed here if auth_return_value is not a dict or missing 'type',
-    # as `st.session_state.auth_status` will remain "pending" and the loop continues
-    # until a valid authentication message is received.
+    # If you still want a custom button, you'd integrate it with auth_status.login()
+    # if st.button("Custom Sign in with Google"):
+    #     auth_status.login() # This would trigger the component's login flow
