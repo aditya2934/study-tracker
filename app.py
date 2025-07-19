@@ -25,13 +25,13 @@ def initialize_firebase_admin_sdk():
 
     if firebase_config is None:
         st.error("Firebase Admin SDK configuration not found in Streamlit secrets. "
-                 "Please ensure you have a [firebase] section in .streamlit/secrets.toml "
+                 "Please ensure you have a `[firebase]` section in `.streamlit/secrets.toml` "
                  "or your Streamlit Cloud secrets.", icon="❌")
         st.stop()
 
     DATABASE_URL = firebase_config.get("database_url")
     if not DATABASE_URL:
-        st.error("database_url not found under [firebase] in Streamlit secrets.", icon="❌")
+        st.error("`database_url` not found under `[firebase]` in Streamlit secrets.", icon="❌")
         st.stop()
 
     if not firebase_admin._apps:
@@ -56,10 +56,10 @@ def initialize_firebase_admin_sdk():
             st.success("Firebase Admin SDK initialized successfully!", icon="✅")
             return True
         except KeyError as ke:
-            st.error(f"Missing Firebase secret key: {ke}. Please check your .streamlit/secrets.toml file.", icon="❌")
+            st.error(f"Missing Firebase secret key: `{ke}`. Please check your `.streamlit/secrets.toml` file.", icon="❌")
             st.stop()
         except Exception as e:
-            st.error(f"Error initializing Firebase Admin SDK. Please verify your .streamlit/secrets.toml and network connection. Error: {e}", icon="❌")
+            st.error(f"Error initializing Firebase Admin SDK. Please verify your `.streamlit/secrets.toml` and network connection. Error: {e}", icon="❌")
             st.stop()
     return False
 
@@ -68,14 +68,14 @@ initialize_firebase_admin_sdk()
 
 # --- CLIENT-SIDE FIREBASE SDK CONFIG (for Authentication in JavaScript) ---
 FIREBASE_CLIENT_CONFIG = json.dumps({
-    "apiKey": st.secrets["firebase_client"]["api_key"],
-    "authDomain": st.secrets["firebase_client"]["auth_domain"],
-    "projectId": st.secrets["firebase_client"]["project_id"],
-    "databaseURL": st.secrets["firebase_client"]["database_url"],
-    "storageBucket": st.secrets["firebase_client"]["storage_bucket"],
-    "messagingSenderId": st.secrets["firebase_client"]["messaging_sender_id"],
-    "appId": st.secrets["firebase_client"]["app_id"],
-    "measurementId": st.secrets["firebase_client"].get("measurement_id", "") # Optional
+    "apiKey": st.secrets["firebase"].get("api_key"),
+    "authDomain": st.secrets["firebase"].get("auth_domain"),
+    "projectId": st.secrets["firebase"].get("project_id"),
+    "databaseURL": st.secrets["firebase"].get("database_url"),
+    "storageBucket": st.secrets["firebase"].get("storage_bucket"),
+    "messagingSenderId": st.secrets["firebase"].get("messaging_sender_id"),
+    "appId": st.secrets["firebase"].get("app_id"),
+    "measurementId": st.secrets["firebase"].get("measurement_id", "") # Optional
 })
 
 # --- SESSION STATE INITIALIZATION FOR AUTHENTICATION ---
@@ -88,7 +88,7 @@ if "auth_status" not in st.session_state:
 
 # --- Streamlit Components for Authentication (using custom HTML/JS) ---
 # This component handles the actual Firebase client-side authentication flow.
-# It now returns a value to Streamlit
+# It now *returns* a value to Streamlit
 def firebase_auth_component():
     html_code = f"""
     <!DOCTYPE html>
@@ -197,30 +197,110 @@ def firebase_auth_component():
     </body>
     </html>
     """
-    # FIX: Removed the 'key' argument as it's not supported by components.html
-    return components.html(html_code, height=100, scrolling=False)
+    # The return value of components.html is the data sent back via Streamlit.setComponentValue
+    # We set a key to ensure it re-renders.
+    return components.html(html_code, height=100, scrolling=False, key="firebase_auth_ui_component")
 
 
 # --- Streamlit Message Listener (to get data from JavaScript component) ---
 # This block now uses the return value of components.html directly.
-# auth_component_value = None # This line is no longer needed at the top level
+auth_component_value = None
+if st.session_state.auth_status == "pending":
+    auth_component_value = firebase_auth_component() # Render and get return value
 
-if st.session_state.auth_status == "logged_in":
-    st.sidebar.markdown(f"*Logged in as:* {st.session_state.user_email}")
-    if st.sidebar.button("Log Out"):
-        # Send message to JS component to trigger logout
-        js_code = """
-        <script>
-            window.signOutUser();
-        </script>
-        """
-        components.html(js_code, height=0)
-        # st.session_state.auth_status will be updated by JS callback
+    if auth_component_value: # If the component sent a message back
+        if auth_component_value.get("type") == "auth_success":
+            st.session_state.user_id = auth_component_value["data"]["uid"]
+            st.session_state.user_email = auth_component_value["data"]["email"]
+            st.session_state.auth_status = "logged_in"
+            st.rerun() # Re-run to update UI to logged-in state
+        elif auth_component_value.get("type") == "auth_failure":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.rerun()
+        elif auth_component_value.get("type") == "auth_error":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.error(f"Authentication Error: {auth_component_value['data']}", icon="❌")
+            st.rerun()
+        elif auth_component_value.get("type") == "auth_signed_out":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.rerun()
 
-    st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
+# --- Functions to interact with Firebase Realtime Database (USER SPECIFIC) ---
+@st.cache_data(ttl=300, show_spinner="Loading your study tasks...")
+def load_tasks_for_user(user_id):
+    if not user_id:
+        return [], [], [], set()
+    try:
+        ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
+        data = ref.get()
+        if not data:
+            return [], [], [], set()
 
-    # --- SESSION STATE INITIALIZATION for APP DATA (depends on user_id) ---
-    # Moved this block inside 'logged_in' check to ensure user_id is set
+        tasks_list = []
+        checks_list = []
+        keys_list = []
+        subjects_set = set()
+
+        for key, value in data.items():
+            task = value.get("task", {})
+            check = value.get("check", {})
+            tasks_list.append(task)
+            checks_list.append(check)
+            keys_list.append(key)
+            if "Subject" in task:
+                subjects_set.add(task["Subject"])
+
+        return tasks_list, checks_list, keys_list, subjects_set
+    except Exception as e:
+        st.error(f"Error loading tasks from Firebase: {e}", icon="❌")
+        return [], [], [], set()
+
+def save_task_for_user(user_id, task, check, key=None):
+    if not user_id:
+        st.warning("Cannot save task: No user logged in.")
+        return None
+    try:
+        ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
+        if not key:
+            key = str(uuid.uuid4())
+        ref.child(key).set({"task": task, "check": check})
+        return key
+    except Exception as e:
+        st.error(f"Error saving task to Firebase: {e}", icon="❌")
+        return None
+
+def delete_task_from_db_for_user(user_id, key):
+    if not user_id:
+        st.warning("Cannot delete task: No user logged in.")
+        return False
+    try:
+        db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks").child(key).delete()
+        return True
+    except Exception as e:
+        st.error(f"Error deleting task from Firebase: {e}", icon="❌")
+        return False
+
+# --- AUDIO PLAYBACK FUNCTION ---
+def play_sound(sound_url: str, unique_key: str):
+    """Embeds an HTML audio player that plays automatically."""
+    audio_html = f"""
+    <audio autoplay style="display:none;" key="{unique_key}">
+      <source src="{sound_url}" type="audio/mpeg">
+      Your browser does not support the audio element.
+    </audio>
+    """
+    components.html(audio_html, height=0)
+
+
+# --- SESSION STATE INITIALIZATION for APP DATA (depends on user_id) ---
+# This block now runs ONLY if the user is logged in
+if st.session_state.user_id:
     if "tasks" not in st.session_state:
         st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, loaded_subjects = load_tasks_for_user(st.session_state.user_id)
         st.session_state.all_subjects = loaded_subjects
@@ -415,7 +495,7 @@ if st.session_state.auth_status == "logged_in":
             <source src="{WHITE_NOISE_URL}" type="audio/mpeg">
         </audio>
 
-        <button id="playPauseBtn" onclick="togglePlay()">▶ Play Noise</button>
+        <button id="playPauseBtn" onclick="togglePlay()">▶️ Play Noise</button>
 
         <script>
             var audio = document.getElementById("whiteNoisePlayer");
@@ -424,10 +504,10 @@ if st.session_state.auth_status == "logged_in":
             function togglePlay() {{
                 if (audio.paused) {{
                     audio.play();
-                    btn.innerHTML = "⏸ Pause Noise";
+                    btn.innerHTML = "⏸️ Pause Noise";
                 }} else {{
                     audio.pause();
-                    btn.innerHTML = "▶ Play Noise";
+                    btn.innerHTML = "▶️ Play Noise";
                 }}
             }}
         </script>
@@ -459,18 +539,18 @@ if st.session_state.auth_status == "logged_in":
                 toggle_mode()
                 st.rerun()
 
-        mode_display_placeholder.markdown(f"<p class='pomodoro-mode-text'>Mode: *{st.session_state.pomodoro_mode.replace('_', ' ').title()}*</p>", unsafe_allow_html=True)
+        mode_display_placeholder.markdown(f"<p class='pomodoro-mode-text'>Mode: **{st.session_state.pomodoro_mode.replace('_', ' ').title()}**</p>", unsafe_allow_html=True)
         timer_display_placeholder.markdown(f"<div class='pomodoro-time-display'>{format_time(st.session_state.pomodoro_time_left)}</div>", unsafe_allow_html=True)
 
         col_play_pause, col_reset, col_next, col_edit_toggle = st.columns(4)
 
         with col_play_pause:
             if st.session_state.pomodoro_running:
-                if st.button("⏸ Pause", key="pomodoro_pause_btn"):
+                if st.button("⏸️ Pause", key="pomodoro_pause_btn"):
                     pause_pomodoro()
                     st.rerun()
             else:
-                if st.button("▶ Start", key="pomodoro_start_btn"):
+                if st.button("▶️ Start", key="pomodoro_start_btn"):
                     start_pomodoro()
                     st.rerun()
         with col_reset:
@@ -478,11 +558,11 @@ if st.session_state.auth_status == "logged_in":
                 reset_pomodoro()
                 st.rerun()
         with col_next:
-            if st.button("⏭ Next Mode", key="pomodoro_toggle_btn"):
+            if st.button("⏭️ Next Mode", key="pomodoro_toggle_btn"):
                 toggle_mode()
                 st.rerun()
         with col_edit_toggle:
-            if st.button("⚙ Edit Durations", key="edit_duration_toggle"):
+            if st.button("⚙️ Edit Durations", key="edit_duration_toggle"):
                 st.session_state.show_pomodoro_edit = not st.session_state.get("show_pomodoro_edit", False)
                 st.rerun()
 
@@ -682,7 +762,7 @@ if st.session_state.auth_status == "logged_in":
 
     # --- EDIT FORM ---
     def display_edit_form(current_task_data, current_task_checks, current_key_fk):
-        st.subheader(f"✏ Editing: {current_task_data['Chapter']}")
+        st.subheader(f"✏️ Editing: {current_task_data['Chapter']}")
         all_subjects_for_edit = sorted(list(st.session_state.all_subjects))
         
         if current_task_data.get("Subject") and current_task_data.get("Subject") not in all_subjects_for_edit:
@@ -711,7 +791,7 @@ if st.session_state.auth_status == "logged_in":
                 if not edited_chapter.strip():
                     st.error("Chapter cannot be empty.", icon="❌")
                 elif not new_sn_list and not new_laq_list:
-                    st.warning("At least one Short Note or Long Answer Question is required.", icon="❌")
+                    st.error("At least one Short Note or Long Answer Question is required.", icon="❌")
                 else:
                     new_checks_sn = [False] * len(new_sn_list)
                     for i, sn_item in enumerate(new_sn_list):
@@ -758,7 +838,7 @@ if st.session_state.auth_status == "logged_in":
 
     # --- Display Task List (with Tick Sound) ---
     def task_list_section():
-        st.header("🗂 Task List")
+        st.header("🗂️ Task List")
 
         if st.session_state.selected_view_subject is None:
             st.info("No subjects to display tasks.")
@@ -799,7 +879,7 @@ if st.session_state.auth_status == "logged_in":
                 col1, col2, col3, col4 = st.columns([1, 1, 0.2, 0.2])
                 with col1:
                     if task.get("SN"):
-                        st.markdown("📝 Short Notes**")
+                        st.markdown("**📝 Short Notes**")
                         for j, t in enumerate(task["SN"]):
                             if st.checkbox(t, key=f"sn_{key_fk}_{j}", value=checks["SN"][j]):
                                 if not checks["SN"][j]:
@@ -813,7 +893,7 @@ if st.session_state.auth_status == "logged_in":
                                 st.rerun()
                 with col2:
                     if task.get("LAQ"):
-                        st.markdown("📄 Long Answer Questions**")
+                        st.markdown("**📄 Long Answer Questions**")
                         for j, t in enumerate(task["LAQ"]):
                             if st.checkbox(t, key=f"laq_{key_fk}_{j}", value=checks["LAQ"][j]):
                                 if not checks["LAQ"][j]:
@@ -827,18 +907,18 @@ if st.session_state.auth_status == "logged_in":
                                 st.rerun()
                 with col3:
                     st.markdown("<br>", unsafe_allow_html=True)
-                    if st.button("✏ Edit", key=f"edit_btn_{key_fk}"):
+                    if st.button("✏️ Edit", key=f"edit_btn_{key_fk}"):
                         st.session_state.editing_task_key = key_fk
                         st.session_state.temp_edit_task_data = task
                         st.rerun()
                 with col4:
                     st.markdown("<br>", unsafe_allow_html=True)
-                    if st.button("🗑 Delete", key=f"del_btn_{key_fk}"):
+                    if st.button("🗑️ Delete", key=f"del_btn_{key_fk}"):
                         st.session_state[f"show_confirm_{key_fk}"] = True
                         st.rerun()
 
             if st.session_state.get(f"show_confirm_{key_fk}", False):
-                st.warning(f"Are you sure you want to delete chapter '{task['Chapter']}'?", icon="⚠")
+                st.warning(f"Are you sure you want to delete chapter '{task['Chapter']}'?", icon="⚠️")
                 col_yes, col_no = st.columns([0.15, 1])
                 with col_yes:
                     if st.button("Yes, Delete", key=f"confirm_del_yes_{key_fk}"):
@@ -863,7 +943,7 @@ if st.session_state.auth_status == "logged_in":
     # --- UNDO DELETE / EXPORT ---
     def undo_delete_section():
         if "last_deleted" in st.session_state and st.session_state.last_deleted is not None:
-            if st.button("↩ Undo Last Delete", key="undo_delete_button"):
+            if st.button("↩️ Undo Last Delete", key="undo_delete_button"):
                 task_to_restore, checks_to_restore, key_to_restore = st.session_state.last_deleted
                 with st.spinner("Restoring task..."):
                     if save_task_for_user(st.session_state.user_id, task_to_restore, checks_to_restore, key_to_restore):
@@ -876,7 +956,7 @@ if st.session_state.auth_status == "logged_in":
                     else: st.error("Failed to undo delete. Please try again.", icon="❌")
 
     def export_csv_section():
-        st.header("⬇ Export Tasks")
+        st.header("⬇️ Export Tasks")
         rows = []
         for i, task in enumerate(st.session_state.tasks):
             if task.get("Subject") == st.session_state.selected_view_subject:
@@ -892,47 +972,72 @@ if st.session_state.auth_status == "logged_in":
         else: st.info("No tasks to export for the selected subject.")
 
 
-elif st.session_state.auth_status == "logged_out":
-    st.warning("Please log in to use the Study Tracker.")
-    if st.button("Sign in with Google"):
-        # Send message to JS component to trigger login
-        js_code = """
-        <script>
-            window.signInWithGoogle();
-        </script>
-        """
-        components.html(js_code, height=0)
-        # st.session_state.auth_status will be updated by JS callback
+    # --- MAIN APP LAYOUT (Conditional based on Authentication) ---
+    if st.session_state.auth_status == "logged_in":
+        st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
+        if st.sidebar.button("Log Out"):
+            # Send message to JS component to trigger logout
+            js_code = """
+            <script>
+                window.signOutUser();
+            </script>
+            """
+            components.html(js_code, height=0)
+            # st.session_state.auth_status = "pending" # Will be set by JS callback
+            # st.rerun() # Will be triggered by JS callback
 
-else: # auth_status == "pending"
-    st.info("Checking authentication status...")
-    # This is where the JS sends data back.
-    auth_return_value = firebase_auth_component()
+        st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
 
-    # FIX: Add a robust check to ensure auth_return_value is a dictionary
-    # [span_0](start_span)and contains 'type' before trying to access it.[span_0](end_span)
-    if isinstance(auth_return_value, dict) and "type" in auth_return_value:
-        if auth_return_value.get("type") == "auth_success":
-            st.session_state.user_id = auth_return_value["data"]["uid"]
-            st.session_state.user_email = auth_return_value["data"]["email"]
-            st.session_state.auth_status = "logged_in"
-            st.rerun() # Re-run to update UI to logged-in state
-        elif auth_return_value.get("type") == "auth_failure":
-            st.session_state.auth_status = "logged_out"
-            st.session_state.user_id = None
-            st.session_state.user_email = None
-            st.rerun()
-        elif auth_return_value.get("type") == "auth_error":
-            st.session_state.auth_status = "logged_out"
-            st.session_state.user_id = None
-            st.session_state.user_email = None
-            st.error(f"Authentication Error: {auth_return_value['data']}", icon="❌")
-            st.rerun()
-        elif auth_return_value.get("type") == "auth_signed_out":
-            st.session_state.auth_status = "logged_out"
-            st.session_state.user_id = None
-            st.session_state.user_email = None
-            st.rerun()
-    # No else needed here if auth_return_value is not a dict or missing 'type',
-    # as st.session_state.auth_status will remain "pending" and the loop continues
-    # until a valid authentication message is received.
+        add_task_form()
+        st.sidebar.divider()
+        undo_delete_section()
+
+        filter_and_search_options()
+        pomodoro_timer_section()
+        st.divider()
+        subject_filter_section()
+        completion_overview_section()
+        st.divider()
+        task_list_section()
+        st.divider()
+        export_csv_section()
+
+    elif st.session_state.auth_status == "logged_out":
+        st.warning("Please log in to use the Study Tracker.")
+        if st.button("Sign in with Google"):
+            # Send message to JS component to trigger login
+            js_code = """
+            <script>
+                window.signInWithGoogle();
+            </script>
+            """
+            components.html(js_code, height=0)
+            # st.session_state.auth_status will be updated by JS callback
+
+    else: # auth_status == "pending"
+        st.info("Checking authentication status...")
+        # The key is crucial to ensure Streamlit knows to receive data from this specific component
+        auth_return_value = firebase_auth_component() # This is where the JS sends data back
+
+        if auth_return_value: # If the component sent a message back
+            if auth_return_value.get("type") == "auth_success":
+                st.session_state.user_id = auth_return_value["data"]["uid"]
+                st.session_state.user_email = auth_return_value["data"]["email"]
+                st.session_state.auth_status = "logged_in"
+                st.rerun() # Re-run to update UI to logged-in state
+            elif auth_return_value.get("type") == "auth_failure":
+                st.session_state.auth_status = "logged_out"
+                st.session_state.user_id = None
+                st.session_state.user_email = None
+                st.rerun()
+            elif auth_return_value.get("type") == "auth_error":
+                st.session_state.auth_status = "logged_out"
+                st.session_state.user_id = None
+                st.session_state.user_email = None
+                st.error(f"Authentication Error: {auth_return_value['data']}", icon="❌")
+                st.rerun()
+            elif auth_return_value.get("type") == "auth_signed_out":
+                st.session_state.auth_status = "logged_out"
+                st.session_state.user_id = None
+                st.session_state.user_email = None
+                st.rerun()
