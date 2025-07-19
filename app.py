@@ -1,6 +1,6 @@
 import streamlit as st
 import firebase_admin
-from firebase_admin import credentials, db, auth # Import auth for user management (optional for this simple example)
+from firebase_admin import credentials, db, auth
 from datetime import date
 import uuid
 import pandas as pd
@@ -8,17 +8,18 @@ import json
 import time
 import streamlit.components.v1 as components
 
+# Import the new authentication component
+from streamlit_google_auth import Authenticate
+
 # --- CONFIGURATION (using Streamlit Secrets) ---
-DB_PATH_ROOT = "users" # New root path for user-specific data
+DB_PATH_ROOT = "users"
 
 # --- AUDIO ASSETS (URLs) ---
 POMODORO_FINISH_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
 TASK_TICK_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-48.mp3"
 WHITE_NOISE_URL = "https://www.soundjay.com/nature/sounds/whitenoise-1.mp3"
 
-
-# --- FIREBASE ADMIN SDK INITIALIZATION (For server-side operations if needed) ---
-# @st.cache_resource ensures this function runs only once across reruns.
+# --- FIREBASE ADMIN SDK INITIALIZATION (For server-side operations) ---
 @st.cache_resource(show_spinner="Initializing Firebase Admin SDK...")
 def initialize_firebase_admin_sdk():
     firebase_config = st.secrets.get("firebase")
@@ -67,6 +68,10 @@ initialize_firebase_admin_sdk()
 
 
 # --- CLIENT-SIDE FIREBASE SDK CONFIG (for Authentication in JavaScript) ---
+# NOTE: This block is now primarily for client-side Firebase API calls if needed,
+# but the core Google Auth will be handled by streamlit_google_auth.
+# Keep this as it is for now, as you might use `firebase.auth()` client-side later
+# for other Firebase features, but the primary auth init moves to `streamlit_google_auth`.
 FIREBASE_CLIENT_CONFIG = json.dumps({
     "apiKey": st.secrets["firebase_client"]["api_key"],
     "authDomain": st.secrets["firebase_client"]["auth_domain"],
@@ -78,182 +83,38 @@ FIREBASE_CLIENT_CONFIG = json.dumps({
     "measurementId": st.secrets["firebase_client"].get("measurement_id", "") # Optional
 })
 
-# --- SESSION STATE INITIALIZATION FOR AUTHENTICATION ---
-if "user_id" not in st.session_state:
-    st.session_state.user_id = None
-if "user_email" not in st.session_state:
-    st.session_state.user_email = None
-if "auth_status" not in st.session_state:
-    st.session_state.auth_status = "pending" # pending, logged_in, logged_out
 
-# --- Streamlit Components for Authentication (using custom HTML/JS) ---
-# This component handles the actual Firebase client-side authentication flow.
-# It now *returns* a value to Streamlit
-def firebase_auth_component():
-    html_code = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
-        <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
-        <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
-        <script>
-            const firebaseConfig = {FIREBASE_CLIENT_CONFIG};
-            if (!firebase.apps.length) {{ firebase.initializeApp(firebaseConfig); }} else {{ firebase.app(); }}
+# --- Authentication Handler using streamlit-google-auth ---
+# You'll replace the custom firebase_auth_component with this.
+auth_status = Authenticate(
+    client_id=st.secrets["google_oauth"]["client_id"],
+    client_secret=st.secrets["google_oauth"]["client_secret"],
+    # The redirect_uri must match what you configured in Google Cloud Console
+    # For Streamlit Cloud: "https://<your-app-name>.streamlit.app"
+    # For local: "http://localhost:8501"
+    # It might also need an explicit path if the component uses one,
+    # e.g., "https://<your-app-name>.streamlit.app/component/streamlit-google-auth"
+    # Check streamlit-google-auth documentation for exact redirect URI needs.
+    redirect_uri=st.secrets["google_oauth"].get("redirect_uri", "http://localhost:8501")
+    # You might pass st.session_state for state management if the component allows
+    # or relies on it, consult its documentation.
+)
 
-            const auth = firebase.auth();
-            const provider = new firebase.auth.GoogleAuthProvider();
-
-            // Function to send data back to Streamlit
-            function sendToStreamlit(type, data) {{
-                // FIX: Check if Streamlit object is defined before calling its methods
-                if (typeof Streamlit !== 'undefined' && Streamlit.setComponentValue) {{
-                    Streamlit.setComponentValue({{ type: type, data: data }});
-                }} else {{
-                    console.warn("Streamlit API not ready or not found, cannot send component value.");
-                    // In a redirect flow, this might not be needed as Streamlit will re-render
-                    // and then pick up auth state from onAuthStateChanged on subsequent loads.
-                }}
-            }}
-            
-            // Set up auth state change listener to send data back
-            // This will fire on initial page load and after redirects
-            auth.onAuthStateChanged(user => {{
-                if (user) {{
-                    sendToStreamlit('auth_success', {{
-                        uid: user.uid,
-                        email: user.email,
-                        displayName: user.displayName
-                    }});
-                }} else {{
-                    sendToStreamlit('auth_failure', null);
-                }}
-            }});
-
-            window.signInWithGoogle = function() {{ // Make global for button click
-                // FIX: Use signInWithRedirect instead of signInWithPopup due to iframe restrictions
-                auth.signInWithRedirect(provider)
-                    .catch((error) => {{
-                        console.error("Auth error: ", error);
-                        sendToStreamlit('auth_error', error.message);
-                    }});
-            }};
-
-            window.signOutUser = function() {{ // Make global for button click
-                auth.signOut()
-                    .then(() => {{
-                        sendToStreamlit('auth_signed_out', null);
-                    }})
-                    .catch((error) => {{
-                        console.error("Sign out error: ", error);
-                        sendToStreamlit('auth_error', error.message);
-                    }});
-            }};
-
-            // FIX: Removed the MutationObserver block
-            // The MutationObserver was causing a TypeError and is less critical for auth state
-            // since onAuthStateChanged handles the initial status after redirects.
-
-        </script>
-        <style>
-            body {{ font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: transparent; }}
-            .auth-buttons {{ text-align: center; }}
-            .auth-buttons button {{
-                background-color: #4285F4; /* Google blue */
-                color: white;
-                padding: 10px 20px;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-                font-size: 16px;
-                margin: 5px;
-                transition: background-color 0.3s ease;
-            }}
-            .auth-buttons button:hover {{ background-color: #357ae8; }}
-        </style>
-    </head>
-    <body>
-        <div class="auth-buttons">
-            <button id="signInButton" onclick="window.signInWithGoogle()">Sign in with Google</button>
-            <button id="signOutButton" onclick="window.signOutUser()" style="display: none;">Sign Out</button>
-        </div>
-    </body>
-    </html>
-    """
-    # Removed the 'key' argument previously
-    return components.html(html_code, height=100, scrolling=False)
+# Call the auth component to handle login/logout/state
+# This will render the login button if not authenticated
+# and update the component's internal state
+user_info = auth_status.st_auth()
 
 
-# --- Functions to interact with Firebase Realtime Database (USER SPECIFIC) ---
-@st.cache_data(ttl=300, show_spinner="Loading your study tasks...")
-def load_tasks_for_user(user_id):
-    if not user_id:
-        return [], [], [], set()
-    try:
-        ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
-        data = ref.get()
-        if not data:
-            return [], [], [], set()
+# --- SESSION STATE INITIALIZATION FOR APP DATA (Conditional based on user_info from new component) ---
+# This block runs if the user is successfully authenticated
+if user_info:
+    st.session_state.auth_status = "logged_in"
+    st.session_state.user_id = user_info['id'] # Get UID from the component's returned info
+    st.session_state.user_email = user_info['email'] # Get email
+    st.session_state.user_name = user_info['name'] # Get display name
 
-        tasks_list = []
-        checks_list = []
-        keys_list = []
-        subjects_set = set()
-
-        for key, value in data.items():
-            task = value.get("task", {})
-            check = value.get("check", {})
-            tasks_list.append(task)
-            checks_list.append(check)
-            keys_list.append(key)
-            if "Subject" in task:
-                subjects_set.add(task["Subject"])
-
-        return tasks_list, checks_list, keys_list, subjects_set
-    except Exception as e:
-        st.error(f"Error loading tasks from Firebase: {e}", icon="❌")
-        return [], [], [], set()
-
-def save_task_for_user(user_id, task, check, key=None):
-    if not user_id:
-        st.warning("Cannot save task: No user logged in.")
-        return None
-    try:
-        ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
-        if not key:
-            key = str(uuid.uuid4())
-        ref.child(key).set({"task": task, "check": check})
-        return key
-    except Exception as e:
-        st.error(f"Error saving task to Firebase: {e}", icon="❌")
-        return None
-
-def delete_task_from_db_for_user(user_id, key):
-    if not user_id:
-        st.warning("Cannot delete task: No user logged in.")
-        return False
-    try:
-        db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks").child(key).delete()
-        return True
-    except Exception as e:
-        st.error(f"Error deleting task from Firebase: {e}", icon="❌")
-        return False
-
-# --- AUDIO PLAYBACK FUNCTION ---
-def play_sound(sound_url: str, unique_key: str):
-    """Embeds an HTML audio player that plays automatically."""
-    audio_html = f"""
-    <audio autoplay style="display:none;" key="{unique_key}">
-      <source src="{sound_url}" type="audio/mpeg">
-      Your browser does not support the audio element.
-    </audio>
-    """
-    components.html(audio_html, height=0)
-
-
-# --- SESSION STATE INITIALIZATION for APP DATA (depends on user_id) ---
-# This block now runs ONLY if the user is logged in
-if st.session_state.user_id:
+    # Remaining session state initializations that depend on user_id
     if "tasks" not in st.session_state:
         st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, loaded_subjects = load_tasks_for_user(st.session_state.user_id)
         st.session_state.all_subjects = loaded_subjects
