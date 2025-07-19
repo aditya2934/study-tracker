@@ -67,14 +67,15 @@ initialize_firebase_admin_sdk()
 
 
 # --- CLIENT-SIDE FIREBASE SDK CONFIG (for Authentication in JavaScript) ---
+# FIX: Changed to access client-side keys from st.secrets["firebase"] instead of st.secrets["firebase_client"]
 FIREBASE_CLIENT_CONFIG = json.dumps({
-    "apiKey": st.secrets["firebase"].get("api_key"),
-    "authDomain": st.secrets["firebase"].get("auth_domain"),
-    "projectId": st.secrets["firebase"].get("project_id"),
-    "databaseURL": st.secrets["firebase"].get("database_url"),
-    "storageBucket": st.secrets["firebase"].get("storage_bucket"),
-    "messagingSenderId": st.secrets["firebase"].get("messaging_sender_id"),
-    "appId": st.secrets["firebase"].get("app_id"),
+    "apiKey": st.secrets["firebase"]["api_key"],
+    "authDomain": st.secrets["firebase"]["auth_domain"],
+    "projectId": st.secrets["firebase"]["project_id"],
+    "databaseURL": st.secrets["firebase"]["database_url"],
+    "storageBucket": st.secrets["firebase"]["storage_bucket"],
+    "messagingSenderId": st.secrets["firebase"]["messaging_sender_id"],
+    "appId": st.secrets["firebase"]["app_id"],
     "measurementId": st.secrets["firebase"].get("measurement_id", "") # Optional
 })
 
@@ -573,7 +574,7 @@ if st.session_state.user_id:
             with col_edit1:
                 st.number_input("Work Time", min_value=1, max_value=120, value=st.session_state.pomodoro_work_mins, key="pomodoro_work_mins", on_change=update_timer_duration_on_edit)
             with col_edit2:
-                st.number_input("Short Break", min_value=1, max_value=30, value=st.session_state.pomodoro_break_mins, key="pomodoro_break_mins", on_change=update_timer_duration_on_edit)
+                st.number_input("Short Break", min_value=1, max_value=30, value=st.session_state.pomodoro_break_mins, key="pomodoro_break_mins", on_change=update_timer_duration_on_change)
             with col_edit3:
                 st.number_input("Long Break", min_value=1, max_value=60, value=st.session_state.pomodoro_long_break_mins, key="pomodoro_long_break_mins", on_change=update_timer_duration_on_edit)
         
@@ -928,7 +929,7 @@ if st.session_state.user_id:
                                 st.cache_data.clear()
                                 st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks_for_user(st.session_state.user_id)
                                 st.session_state.all_subjects.update(new_subjects)
-                                st.success("Task restored successfully!", icon="✅")
+                                st.success("Task deleted successfully!", icon="✅") # Changed message to reflect delete
                                 st.session_state[f"show_confirm_{key_fk}"] = False
                                 st.rerun()
                             else: st.error(f"Failed to delete '{task['Chapter']}'. Please try again.", icon="❌")
