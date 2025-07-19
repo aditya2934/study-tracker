@@ -205,17 +205,15 @@ def firebase_auth_component():
     """
     # This call embeds the component. Its return value is the data sent via Streamlit.setComponentValue
     # but we will read that data from st.session_state directly now.
-    return components.html(html_code, height=100, scrolling=False, key="firebase_auth_ui_component")
-
-
-# --- Render the authentication component unconditionally at the top level ---
-# This ensures its key is stable across all reruns, which is crucial for Streamlit components.
-# The return value here is the data sent by the JS component.
-auth_component_data = firebase_auth_component()
-
-# --- Process authentication messages from the component and update main session state ---
+    auth_component_data = components.html(html_code, height=100, scrolling=False)
+    return auth_component_data
+ 
+ # --- Process authentication messages from the component and update main session state ---
 # This block runs on every rerun to check for updates from the JS component.
-if auth_component_data is not None:
+# Note: The component call is now inside the main app logic below.
+# This logic processes the data from the component after it's rendered.
+
+if 'auth_component_data' in locals() and auth_component_data is not None:
     # Update the session state variables that directly reflect the JS component's output
     st.session_state.auth_status_from_js = auth_component_data.get("status", "pending")
     st.session_state.user_data_from_js = auth_component_data.get("userData", None)
@@ -997,11 +995,6 @@ if st.session_state.user_id:
 
 # --- MAIN APP LAYOUT (Conditional based on Authentication) ---
 
-# Always render the authentication component at the top.
-# Its return value (if any) will be handled by the processing block below.
-# This ensures a stable key for the component across all reruns.
-firebase_auth_component()
-
 # Process authentication status updates from the JavaScript component
 # This block should be placed after the component rendering but before the main app logic
 if st.session_state.auth_status_from_js == "logged_in":
@@ -1030,17 +1023,11 @@ elif st.session_state.auth_status_from_js == "error":
 
 # Main application content based on authentication status
 if st.session_state.auth_status == "logged_in":
-    st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
-    if st.sidebar.button("Log Out"):
-        # Send message to JS component to trigger logout
-        js_code = """
-        <script>
-            window.signOutUser();
-        </script>
-        """
-        components.html(js_code, height=0, key="logout_trigger_js") # Use a unique key for this temporary component
-        # The JS component will update session_state.auth_status_from_js, which will trigger a rerun.
-
+    st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")    
+    # The sign-out button is now part of the persistent firebase_auth_component.
+    # We just need to make sure the component is rendered in the sidebar.
+    with st.sidebar:
+        firebase_auth_component() # This now just renders the buttons
     st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
 
     add_task_form()
@@ -1059,10 +1046,17 @@ if st.session_state.auth_status == "logged_in":
 
 elif st.session_state.auth_status == "logged_out":
     st.warning("Please log in to use the Study Tracker.")
-    # The firebase_auth_component is already rendered at the top.
-    # Its JS will display the login button.
+    auth_component_data = firebase_auth_component() # Show login button
+    # We still need to process its potential output on this run
+    if auth_component_data is not None:
+        st.session_state.auth_status_from_js = auth_component_data.get("status", "pending")
+        st.session_state.user_data_from_js = auth_component_data.get("userData", None)
+        st.rerun() # Rerun to process the new state immediately
 
 else: # auth_status == "pending"
     st.info("Checking authentication status...")
-    # The firebase_auth_component is already rendered at the top.
-    # We are just waiting for its callback to update auth_status_from_js.
+    auth_component_data = firebase_auth_component() # Render component to get its initial status
+    if auth_component_data is not None:
+        st.session_state.auth_status_from_js = auth_component_data.get("status", "pending")
+        st.session_state.user_data_from_js = auth_component_data.get("userData", None)
+        st.rerun() # Rerun to process the new state immediately
