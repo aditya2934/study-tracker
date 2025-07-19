@@ -85,14 +85,17 @@ if "user_email" not in st.session_state:
     st.session_state.user_email = None
 if "auth_status" not in st.session_state:
     st.session_state.auth_status = "pending" # pending, logged_in, logged_out
-# New state variable to track the last data received from the auth component
-if "last_auth_component_data" not in st.session_state:
-    st.session_state.last_auth_component_data = None
+
+# New session state variables for direct communication from JS component
+if "auth_status_from_js" not in st.session_state:
+    st.session_state.auth_status_from_js = "pending" # Reflects what JS component reports
+if "user_data_from_js" not in st.session_state:
+    st.session_state.user_data_from_js = None # User data from JS component
 
 
 # --- Streamlit Components for Authentication (using custom HTML/JS) ---
 # This component handles the actual Firebase client-side authentication flow.
-# It now *returns* a value to Streamlit
+# It now *does not return a value directly*, but updates Streamlit's session state.
 def firebase_auth_component():
     html_code = f"""
     <!DOCTYPE html>
@@ -108,9 +111,10 @@ def firebase_auth_component():
             const auth = firebase.auth();
             const provider = new firebase.auth.GoogleAuthProvider();
 
-            function sendAuthStatusToStreamlit(type, data) {{
-                if (window.Streamlit) {{ // Ensure Streamlit object is available
-                    Streamlit.setComponentValue({{ type: type, data: data }});
+            // Function to send data back to Streamlit using Streamlit.setComponentValue
+            function updateStreamlitAuthStatus(status, userData = null) {{
+                if (window.Streamlit) {{
+                    Streamlit.setComponentValue({{ status: status, userData: userData }});
                 }} else {{
                     console.error("Streamlit object not found. Cannot send data.");
                 }}
@@ -125,22 +129,16 @@ def firebase_auth_component():
                     // Update UI for logged-in state
                     if (signInButton) signInButton.style.display = 'none';
                     if (signOutButton) signOutButton.style.display = 'block';
-                    // Add a small delay before sending to Streamlit
-                    setTimeout(() => {{
-                        sendAuthStatusToStreamlit('auth_success', {{
-                            uid: user.uid,
-                            email: user.email,
-                            displayName: user.displayName
-                        }});
-                    }}, 50); // Small delay
+                    updateStreamlitAuthStatus('logged_in', {{
+                        uid: user.uid,
+                        email: user.email,
+                        displayName: user.displayName
+                    }});
                 }} else {{
                     // Update UI for logged-out state
                     if (signInButton) signInButton.style.display = 'block';
                     if (signOutButton) signOutButton.style.display = 'none';
-                    // Add a small delay before sending to Streamlit
-                    setTimeout(() => {{
-                        sendAuthStatusToStreamlit('auth_failure', null);
-                    }}, 50); // Small delay
+                    updateStreamlitAuthStatus('logged_out', null);
                 }}
             }});
 
@@ -148,27 +146,33 @@ def firebase_auth_component():
                 auth.signInWithPopup(provider)
                     .catch((error) => {{
                         console.error("Auth error: ", error);
-                        sendAuthStatusToStreamlit('auth_error', error.message);
+                        updateStreamlitAuthStatus('error', error.message);
                     }});
             }};
 
             window.signOutUser = function() {{ // Make global for button click
                 auth.signOut()
                     .then(() => {{
-                        sendAuthStatusToStreamlit('auth_signed_out', null);
+                        updateStreamlitAuthStatus('logged_out', null); // Directly set to logged_out on successful sign out
                     }})
                     .catch((error) => {{
                         console.error("Sign out error: ", error);
-                        sendAuthStatusToStreamlit('auth_error', error.message);
+                        updateStreamlitAuthStatus('error', error.message);
                     }});
             }};
 
             // This is crucial: Signal that the component is ready.
-            // onAuthStateChanged will handle sending the initial state.
+            // The onAuthStateChanged listener will handle sending the initial state.
             document.addEventListener('DOMContentLoaded', function() {{
                 setTimeout(() => {{
                     if (window.Streamlit) {{
                         Streamlit.setComponentReady();
+                        // Also send initial state explicitly on DOMContentLoaded for robustness
+                        if (auth.currentUser) {{
+                            updateStreamlitAuthStatus('logged_in', {{ uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName }});
+                        }} else {{
+                            updateStreamlitAuthStatus('logged_out', null);
+                        }}
                     }}
                 }}, 100); // Small delay
             }});
@@ -199,48 +203,47 @@ def firebase_auth_component():
     </body>
     </html>
     """
-    # The return value of components.html is the data sent back via Streamlit.setComponentValue
-    # We use a static key to ensure it's always the same component instance.
+    # This call embeds the component. Its return value is the data sent via Streamlit.setComponentValue
+    # but we will read that data from st.session_state directly now.
     return components.html(html_code, height=100, scrolling=False, key="firebase_auth_ui_component")
 
 
 # --- Render the authentication component unconditionally at the top level ---
 # This ensures its key is stable across all reruns, which is crucial for Streamlit components.
-auth_component_value = firebase_auth_component()
+# The return value here is the data sent by the JS component.
+auth_component_data = firebase_auth_component()
 
-# --- Process authentication messages from the component ---
-# Only process if new data is received AND it's different from the last processed data
-if auth_component_value and auth_component_value != st.session_state.last_auth_component_data:
-    st.session_state.last_auth_component_data = auth_component_value # Store the new data
+# --- Process authentication messages from the component and update main session state ---
+# This block runs on every rerun to check for updates from the JS component.
+if auth_component_data is not None:
+    # Update the session state variables that directly reflect the JS component's output
+    st.session_state.auth_status_from_js = auth_component_data.get("status", "pending")
+    st.session_state.user_data_from_js = auth_component_data.get("userData", None)
 
-    if auth_component_value.get("type") == "auth_success":
-        new_user_id = auth_component_value["data"]["uid"]
-        new_user_email = auth_component_value["data"]["email"]
+    # Now, compare with the main auth_status and trigger rerun only if needed
+    if st.session_state.auth_status_from_js == "logged_in":
+        new_user_id = st.session_state.user_data_from_js["uid"] if st.session_state.user_data_from_js else None
+        new_user_email = st.session_state.user_data_from_js["email"] if st.session_state.user_data_from_js else None
+
         if st.session_state.auth_status != "logged_in" or st.session_state.user_id != new_user_id:
             st.session_state.user_id = new_user_id
             st.session_state.user_email = new_user_email
             st.session_state.auth_status = "logged_in"
             st.rerun()
-    elif auth_component_value.get("type") == "auth_failure":
+    elif st.session_state.auth_status_from_js == "logged_out":
         if st.session_state.auth_status != "logged_out":
             st.session_state.auth_status = "logged_out"
             st.session_state.user_id = None
             st.session_state.user_email = None
             st.rerun()
-    elif auth_component_value.get("type") == "auth_error":
-        # Always rerun on error if the status isn't already logged out, to display the message
-        if st.session_state.auth_status != "logged_out":
+    elif st.session_state.auth_status_from_js == "error":
+        if st.session_state.auth_status != "logged_out": # If an error occurs, force logout state
             st.session_state.auth_status = "logged_out"
             st.session_state.user_id = None
             st.session_state.user_email = None
-            st.error(f"Authentication Error: {auth_component_value['data']}", icon="❌")
+            st.error(f"Authentication Error: {st.session_state.user_data_from_js}", icon="❌") # user_data_from_js will contain error message
             st.rerun()
-    elif auth_component_value.get("type") == "auth_signed_out":
-        if st.session_state.auth_status != "logged_out":
-            st.session_state.auth_status = "logged_out"
-            st.session_state.user_id = None
-            st.session_state.user_email = None
-            st.rerun()
+    # No need for "pending" case to trigger rerun, as it's the initial state or waiting
 
 
 # --- Functions to interact with Firebase Realtime Database (USER SPECIFIC) ---
@@ -463,8 +466,8 @@ if st.session_state.user_id:
         background-color: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 8px;
         cursor: pointer; font-size: 1em; margin: 5px; transition: background-color 0.3s ease, transform 0.1s ease;
     }
-    .stButton button:hover { background-color: #45a049; transform: translateY(-2px); }
-    .stButton button:active { transform: translateY(0); }
+    .stButton button:hover {{ background-color: #45a049; transform: translateY(-2px); }}
+    .stButton button:active {{ transform: translateY(0); }}
     .stButton button:disabled { background-color: #cccccc; cursor: not-allowed; }
     body[data-theme="dark"] .stButton button { background-color: #3cb371; }
     body[data-theme="dark"] .stButton button:hover { background-color: #2e8b57; }
@@ -992,44 +995,74 @@ if st.session_state.user_id:
         else: st.info("No tasks to export for the selected subject.")
 
 
-    # --- MAIN APP LAYOUT (Conditional based on Authentication) ---
-    if st.session_state.auth_status == "logged_in":
-        st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
-        if st.sidebar.button("Log Out"):
-            # Send message to JS component to trigger logout
-            js_code = """
-            <script>
-                window.signOutUser();
-            </script>
-            """
-            components.html(js_code, height=0)
-            # st.session_state.auth_status will be updated by the JS callback, triggering a rerun.
+# --- MAIN APP LAYOUT (Conditional based on Authentication) ---
 
-        st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
+# Always render the authentication component at the top.
+# Its return value (if any) will be handled by the processing block below.
+# This ensures a stable key for the component across all reruns.
+firebase_auth_component()
 
-        add_task_form()
-        st.sidebar.divider()
-        undo_delete_section()
+# Process authentication status updates from the JavaScript component
+# This block should be placed after the component rendering but before the main app logic
+if st.session_state.auth_status_from_js == "logged_in":
+    new_user_id = st.session_state.user_data_from_js["uid"] if st.session_state.user_data_from_js else None
+    new_user_email = st.session_state.user_data_from_js["email"] if st.session_state.user_data_from_js else None
 
-        filter_and_search_options()
-        pomodoro_timer_section()
-        st.divider()
-        subject_filter_section()
-        completion_overview_section()
-        st.divider()
-        task_list_section()
-        st.divider()
-        export_csv_section()
+    if st.session_state.auth_status != "logged_in" or st.session_state.user_id != new_user_id:
+        st.session_state.user_id = new_user_id
+        st.session_state.user_email = new_user_email
+        st.session_state.auth_status = "logged_in"
+        st.rerun()
+elif st.session_state.auth_status_from_js == "logged_out":
+    if st.session_state.auth_status != "logged_out":
+        st.session_state.auth_status = "logged_out"
+        st.session_state.user_id = None
+        st.session_state.user_email = None
+        st.rerun()
+elif st.session_state.auth_status_from_js == "error":
+    if st.session_state.auth_status != "logged_out": # If an error occurs, force logout state
+        st.session_state.auth_status = "logged_out"
+        st.session_state.user_id = None
+        st.session_state.user_email = None
+        st.error(f"Authentication Error: {st.session_state.user_data_from_js}", icon="❌")
+        st.rerun()
 
-    elif st.session_state.auth_status == "logged_out":
-        st.warning("Please log in to use the Study Tracker.")
-        # The firebase_auth_component is always rendered at the top level
-        # so there's no need to render it again here.
-        # Its JS will display the login button.
 
-    else: # auth_status == "pending"
-        st.info("Checking authentication status...")
-        # The firebase_auth_component is always rendered at the top level
-        # so there's no need to render it again here.
-        # We are just waiting for its callback to update auth_status.
+# Main application content based on authentication status
+if st.session_state.auth_status == "logged_in":
+    st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
+    if st.sidebar.button("Log Out"):
+        # Send message to JS component to trigger logout
+        js_code = """
+        <script>
+            window.signOutUser();
+        </script>
+        """
+        components.html(js_code, height=0, key="logout_trigger_js") # Use a unique key for this temporary component
+        # The JS component will update session_state.auth_status_from_js, which will trigger a rerun.
 
+    st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
+
+    add_task_form()
+    st.sidebar.divider()
+    undo_delete_section()
+
+    filter_and_search_options()
+    pomodoro_timer_section()
+    st.divider()
+    subject_filter_section()
+    completion_overview_section()
+    st.divider()
+    task_list_section()
+    st.divider()
+    export_csv_section()
+
+elif st.session_state.auth_status == "logged_out":
+    st.warning("Please log in to use the Study Tracker.")
+    # The firebase_auth_component is already rendered at the top.
+    # Its JS will display the login button.
+
+else: # auth_status == "pending"
+    st.info("Checking authentication status...")
+    # The firebase_auth_component is already rendered at the top.
+    # We are just waiting for its callback to update auth_status_from_js.
