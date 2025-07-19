@@ -85,6 +85,10 @@ if "user_email" not in st.session_state:
     st.session_state.user_email = None
 if "auth_status" not in st.session_state:
     st.session_state.auth_status = "pending" # pending, logged_in, logged_out
+# New state variable to track the last data received from the auth component
+if "last_auth_component_data" not in st.session_state:
+    st.session_state.last_auth_component_data = None
+
 
 # --- Streamlit Components for Authentication (using custom HTML/JS) ---
 # This component handles the actual Firebase client-side authentication flow.
@@ -104,7 +108,6 @@ def firebase_auth_component():
             const auth = firebase.auth();
             const provider = new firebase.auth.GoogleAuthProvider();
 
-            // Function to send data back to Streamlit using Streamlit.setComponentValue
             function sendAuthStatusToStreamlit(type, data) {{
                 if (window.Streamlit) {{ // Ensure Streamlit object is available
                     Streamlit.setComponentValue({{ type: type, data: data }});
@@ -115,14 +118,29 @@ def firebase_auth_component():
 
             // Listen for auth state changes and send to Streamlit
             auth.onAuthStateChanged(user => {{
+                const signInButton = document.getElementById('signInButton');
+                const signOutButton = document.getElementById('signOutButton');
+
                 if (user) {{
-                    sendAuthStatusToStreamlit('auth_success', {{
-                        uid: user.uid,
-                        email: user.email,
-                        displayName: user.displayName
-                    }});
+                    // Update UI for logged-in state
+                    if (signInButton) signInButton.style.display = 'none';
+                    if (signOutButton) signOutButton.style.display = 'block';
+                    // Add a small delay before sending to Streamlit
+                    setTimeout(() => {{
+                        sendAuthStatusToStreamlit('auth_success', {{
+                            uid: user.uid,
+                            email: user.email,
+                            displayName: user.displayName
+                        }});
+                    }}, 50); // Small delay
                 }} else {{
-                    sendAuthStatusToStreamlit('auth_failure', null);
+                    // Update UI for logged-out state
+                    if (signInButton) signInButton.style.display = 'block';
+                    if (signOutButton) signOutButton.style.display = 'none';
+                    // Add a small delay before sending to Streamlit
+                    setTimeout(() => {{
+                        sendAuthStatusToStreamlit('auth_failure', null);
+                    }}, 50); // Small delay
                 }}
             }});
 
@@ -145,18 +163,12 @@ def firebase_auth_component():
                     }});
             }};
 
-            // This is crucial: Send an initial state after the component is ready
-            // and Firebase has had a chance to check auth state.
+            // This is crucial: Signal that the component is ready.
+            // onAuthStateChanged will handle sending the initial state.
             document.addEventListener('DOMContentLoaded', function() {{
-                // A small delay can sometimes help ensure Firebase has initialized
                 setTimeout(() => {{
                     if (window.Streamlit) {{
-                        if (auth.currentUser) {{
-                            sendAuthStatusToStreamlit('auth_success', {{ uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName }});
-                        }} else {{
-                            sendAuthStatusToStreamlit('auth_failure', null);
-                        }}
-                        Streamlit.setComponentReady(); // Indicate component is fully loaded and ready to receive/send
+                        Streamlit.setComponentReady();
                     }}
                 }}, 100); // Small delay
             }});
@@ -188,37 +200,47 @@ def firebase_auth_component():
     </html>
     """
     # The return value of components.html is the data sent back via Streamlit.setComponentValue
-    # We set a key to ensure it re-renders.
+    # We use a static key to ensure it's always the same component instance.
     return components.html(html_code, height=100, scrolling=False, key="firebase_auth_ui_component")
 
 
-# --- Streamlit Message Listener (to get data from JavaScript component) ---
-# This block now uses the return value of components.html directly.
-# Always render the component and process its return value
+# --- Render the authentication component unconditionally at the top level ---
+# This ensures its key is stable across all reruns, which is crucial for Streamlit components.
 auth_component_value = firebase_auth_component()
 
-if auth_component_value: # If the component sent a message back
+# --- Process authentication messages from the component ---
+# Only process if new data is received AND it's different from the last processed data
+if auth_component_value and auth_component_value != st.session_state.last_auth_component_data:
+    st.session_state.last_auth_component_data = auth_component_value # Store the new data
+
     if auth_component_value.get("type") == "auth_success":
-        st.session_state.user_id = auth_component_value["data"]["uid"]
-        st.session_state.user_email = auth_component_value["data"]["email"]
-        st.session_state.auth_status = "logged_in"
-        st.rerun() # Re-run to update UI to logged-in state
+        new_user_id = auth_component_value["data"]["uid"]
+        new_user_email = auth_component_value["data"]["email"]
+        if st.session_state.auth_status != "logged_in" or st.session_state.user_id != new_user_id:
+            st.session_state.user_id = new_user_id
+            st.session_state.user_email = new_user_email
+            st.session_state.auth_status = "logged_in"
+            st.rerun()
     elif auth_component_value.get("type") == "auth_failure":
-        st.session_state.auth_status = "logged_out"
-        st.session_state.user_id = None
-        st.session_state.user_email = None
-        st.rerun()
+        if st.session_state.auth_status != "logged_out":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.rerun()
     elif auth_component_value.get("type") == "auth_error":
-        st.session_state.auth_status = "logged_out"
-        st.session_state.user_id = None
-        st.session_state.user_email = None
-        st.error(f"Authentication Error: {auth_component_value['data']}", icon="❌")
-        st.rerun()
+        # Always rerun on error if the status isn't already logged out, to display the message
+        if st.session_state.auth_status != "logged_out":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.error(f"Authentication Error: {auth_component_value['data']}", icon="❌")
+            st.rerun()
     elif auth_component_value.get("type") == "auth_signed_out":
-        st.session_state.auth_status = "logged_out"
-        st.session_state.user_id = None
-        st.session_state.user_email = None
-        st.rerun()
+        if st.session_state.auth_status != "logged_out":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.rerun()
 
 
 # --- Functions to interact with Firebase Realtime Database (USER SPECIFIC) ---
@@ -563,7 +585,7 @@ if st.session_state.user_id:
             with col_edit1:
                 st.number_input("Work Time", min_value=1, max_value=120, value=st.session_state.pomodoro_work_mins, key="pomodoro_work_mins", on_change=update_timer_duration_on_edit)
             with col_edit2:
-                st.number_input("Short Break", min_value=1, max_value=30, value=st.session_state.pomodoro_break_mins, key="pomodoro_break_mins", on_change=update_timer_duration_on_edit) # Fixed typo here
+                st.number_input("Short Break", min_value=1, max_value=30, value=st.session_state.pomodoro_break_mins, key="pomodoro_break_mins", on_change=update_timer_duration_on_edit)
             with col_edit3:
                 st.number_input("Long Break", min_value=1, max_value=60, value=st.session_state.pomodoro_long_break_mins, key="pomodoro_long_break_mins", on_change=update_timer_duration_on_edit)
         
@@ -871,13 +893,15 @@ if st.session_state.user_id:
                     if task.get("SN"):
                         st.markdown("**📝 Short Notes**")
                         for j, t in enumerate(task["SN"]):
-                            if st.checkbox(t, key=f"sn_{key_fk}_{j}", value=checks["SN"][j]):
-                                if not checks["SN"][j]:
+                            # Check if the index exists in checks["SN"] before accessing
+                            current_check_status = checks["SN"][j] if j < len(checks.get("SN", [])) else False
+                            if st.checkbox(t, key=f"sn_{key_fk}_{j}", value=current_check_status):
+                                if not current_check_status: # Only save if status changed to checked
                                     checks["SN"][j] = True
                                     save_task_for_user(st.session_state.user_id, task, checks, key=key_fk)
                                     st.session_state.play_tick_sound = True
                                     st.rerun()
-                            elif checks["SN"][j]:
+                            elif current_check_status: # Only save if status changed to unchecked
                                 checks["SN"][j] = False
                                 save_task_for_user(st.session_state.user_id, task, checks, key=key_fk)
                                 st.rerun()
@@ -885,13 +909,15 @@ if st.session_state.user_id:
                     if task.get("LAQ"):
                         st.markdown("**📄 Long Answer Questions**")
                         for j, t in enumerate(task["LAQ"]):
-                            if st.checkbox(t, key=f"laq_{key_fk}_{j}", value=checks["LAQ"][j]):
-                                if not checks["LAQ"][j]:
+                            # Check if the index exists in checks["LAQ"] before accessing
+                            current_check_status = checks["LAQ"][j] if j < len(checks.get("LAQ", [])) else False
+                            if st.checkbox(t, key=f"laq_{key_fk}_{j}", value=current_check_status):
+                                if not current_check_status: # Only save if status changed to checked
                                     checks["LAQ"][j] = True
                                     save_task_for_user(st.session_state.user_id, task, checks, key=key_fk)
                                     st.session_state.play_tick_sound = True
                                     st.rerun()
-                            elif checks["LAQ"][j]:
+                            elif current_check_status: # Only save if status changed to unchecked
                                 checks["LAQ"][j] = False
                                 save_task_for_user(st.session_state.user_id, task, checks, key=key_fk)
                                 st.rerun()
@@ -952,9 +978,13 @@ if st.session_state.user_id:
             if task.get("Subject") == st.session_state.selected_view_subject:
                 checks = st.session_state.task_checks[i]
                 for j, t in enumerate(task.get("SN",[])):
-                    rows.append([task["Subject"],task["Chapter"],"SN",t,task["Priority"],task["Deadline"], "Done" if checks["SN"][j] else "Pending"])
+                    # Ensure checks index exists
+                    sn_status = "Done" if j < len(checks.get("SN", [])) and checks["SN"][j] else "Pending"
+                    rows.append([task["Subject"],task["Chapter"],"SN",t,task["Priority"],task["Deadline"], sn_status])
                 for j, t in enumerate(task.get("LAQ",[])):
-                    rows.append([task["Subject"],task["Chapter"],"LAQ",t,task["Priority"],task["Deadline"], "Done" if checks["LAQ"][j] else "Pending"])
+                    # Ensure checks index exists
+                    laq_status = "Done" if j < len(checks.get("LAQ", [])) and checks["LAQ"][j] else "Pending"
+                    rows.append([task["Subject"],task["Chapter"],"LAQ",t,task["Priority"],task["Deadline"], laq_status])
         if rows:
             df = pd.DataFrame(rows, columns=["Subject","Chapter","Type","Task","Priority","Deadline", "Status"])
             csv = df.to_csv(index=False).encode()
@@ -973,8 +1003,7 @@ if st.session_state.user_id:
             </script>
             """
             components.html(js_code, height=0)
-            # st.session_state.auth_status = "pending" # This will be set by JS callback
-            # st.rerun() # This will be triggered by JS callback
+            # st.session_state.auth_status will be updated by the JS callback, triggering a rerun.
 
         st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
 
@@ -996,10 +1025,11 @@ if st.session_state.user_id:
         st.warning("Please log in to use the Study Tracker.")
         # The firebase_auth_component is always rendered at the top level
         # so there's no need to render it again here.
-        pass # The component itself will display the login button
+        # Its JS will display the login button.
 
     else: # auth_status == "pending"
         st.info("Checking authentication status...")
         # The firebase_auth_component is always rendered at the top level
         # so there's no need to render it again here.
-        pass # The component itself is handling the "pending" state.
+        # We are just waiting for its callback to update auth_status.
+
