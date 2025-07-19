@@ -115,13 +115,22 @@ def firebase_auth_component():
 
             // Listen for auth state changes and send to Streamlit
             auth.onAuthStateChanged(user => {{
+                const signInButton = document.getElementById('signInButton');
+                const signOutButton = document.getElementById('signOutButton');
+
                 if (user) {{
+                    // Update UI for logged-in state
+                    if (signInButton) signInButton.style.display = 'none';
+                    if (signOutButton) signOutButton.style.display = 'block';
                     sendAuthStatusToStreamlit('auth_success', {{
                         uid: user.uid,
                         email: user.email,
                         displayName: user.displayName
                     }});
                 }} else {{
+                    // Update UI for logged-out state
+                    if (signInButton) signInButton.style.display = 'block';
+                    if (signOutButton) signOutButton.style.display = 'none';
                     sendAuthStatusToStreamlit('auth_failure', null);
                 }}
             }});
@@ -151,12 +160,9 @@ def firebase_auth_component():
                 // A small delay can sometimes help ensure Firebase has initialized
                 setTimeout(() => {{
                     if (window.Streamlit) {{
-                        if (auth.currentUser) {{
-                            sendAuthStatusToStreamlit('auth_success', {{ uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName }});
-                        }} else {{
-                            sendAuthStatusToStreamlit('auth_failure', null);
-                        }}
-                        Streamlit.setComponentReady(); // Indicate component is fully loaded and ready to receive/send
+                        // The onAuthStateChanged listener above will handle sending the initial state.
+                        // We just need to signal that the component is ready.
+                        Streamlit.setComponentReady();
                     }}
                 }}, 100); // Small delay
             }});
@@ -193,29 +199,34 @@ def firebase_auth_component():
 
 
 # --- Streamlit Message Listener (to get data from JavaScript component) ---
-# This block now uses the return value of components.html directly.
-auth_component_value = None
-if st.session_state.auth_status == "pending":
-    auth_component_value = firebase_auth_component() # Render and get return value
+# Always render the component. Its internal JS will manage button visibility.
+auth_component_value = firebase_auth_component()
 
-    if auth_component_value: # If the component sent a message back
-        if auth_component_value.get("type") == "auth_success":
+if auth_component_value: # If the component sent a message back
+    if auth_component_value.get("type") == "auth_success":
+        # Only rerun if the user ID or auth status actually changes
+        if st.session_state.user_id != auth_component_value["data"]["uid"] or st.session_state.auth_status != "logged_in":
             st.session_state.user_id = auth_component_value["data"]["uid"]
             st.session_state.user_email = auth_component_value["data"]["email"]
             st.session_state.auth_status = "logged_in"
-            st.rerun() # Re-run to update UI to logged-in state
-        elif auth_component_value.get("type") == "auth_failure":
+            st.rerun()
+    elif auth_component_value.get("type") == "auth_failure":
+        # Only rerun if the auth status actually changes to logged_out
+        if st.session_state.auth_status != "logged_out":
             st.session_state.auth_status = "logged_out"
             st.session_state.user_id = None
             st.session_state.user_email = None
             st.rerun()
-        elif auth_component_value.get("type") == "auth_error":
-            st.session_state.auth_status = "logged_out"
-            st.session_state.user_id = None
-            st.session_state.user_email = None
-            st.error(f"Authentication Error: {auth_component_value['data']}", icon="❌")
-            st.rerun()
-        elif auth_component_value.get("type") == "auth_signed_out":
+    elif auth_component_value.get("type") == "auth_error":
+        # Always rerun on error to display the message
+        st.session_state.auth_status = "logged_out"
+        st.session_state.user_id = None
+        st.session_state.user_email = None
+        st.error(f"Authentication Error: {auth_component_value['data']}", icon="❌")
+        st.rerun()
+    elif auth_component_value.get("type") == "auth_signed_out":
+        # Only rerun if the auth status actually changes to logged_out
+        if st.session_state.auth_status != "logged_out":
             st.session_state.auth_status = "logged_out"
             st.session_state.user_id = None
             st.session_state.user_email = None
@@ -563,7 +574,8 @@ if st.session_state.user_id:
             with col_edit1:
                 st.number_input("Work Time", min_value=1, max_value=120, value=st.session_state.pomodoro_work_mins, key="pomodoro_work_mins", on_change=update_timer_duration_on_edit)
             with col_edit2:
-                st.number_input("Short Break", min_value=1, max_value=30, value=st.session_state.pomodoro_break_mins, key="pomodoro_break_mins", on_change=update_timer_duration_on_change)
+                # Corrected the on_change function name here
+                st.number_input("Short Break", min_value=1, max_value=30, value=st.session_state.pomodoro_break_mins, key="pomodoro_break_mins", on_change=update_timer_duration_on_edit)
             with col_edit3:
                 st.number_input("Long Break", min_value=1, max_value=60, value=st.session_state.pomodoro_long_break_mins, key="pomodoro_long_break_mins", on_change=update_timer_duration_on_edit)
         
@@ -591,7 +603,7 @@ if st.session_state.user_id:
                 "Subject", 
                 subject_options, 
                 key="add_subject_select",
-                index=0
+                index=0 # Default to "Add new subject"
             )
 
             subject_to_add = ""
@@ -722,9 +734,12 @@ if st.session_state.user_id:
                     if end_date_filter and task_deadline > end_date_filter:
                         continue
                 except ValueError:
+                    # If deadline string is invalid, treat it as if no date filter applies
+                    # Or, if you prefer, consider it a non-match for date filters:
                     if start_date_filter or end_date_filter:
                         continue
             elif start_date_filter or end_date_filter:
+                # If task has no deadline but a filter is applied, skip it
                 continue
 
             filtered_tasks.append((i, task, st.session_state.task_checks[i], st.session_state.task_keys[i]))
@@ -871,13 +886,15 @@ if st.session_state.user_id:
                     if task.get("SN"):
                         st.markdown("**📝 Short Notes**")
                         for j, t in enumerate(task["SN"]):
-                            if st.checkbox(t, key=f"sn_{key_fk}_{j}", value=checks["SN"][j]):
-                                if not checks["SN"][j]:
+                            # Check if the index exists in checks["SN"] to prevent IndexError
+                            current_check_status = checks["SN"][j] if j < len(checks.get("SN", [])) else False
+                            if st.checkbox(t, key=f"sn_{key_fk}_{j}", value=current_check_status):
+                                if not current_check_status: # Only save if status changed to checked
                                     checks["SN"][j] = True
                                     save_task_for_user(st.session_state.user_id, task, checks, key=key_fk)
                                     st.session_state.play_tick_sound = True
                                     st.rerun()
-                            elif checks["SN"][j]:
+                            elif current_check_status: # Only save if status changed to unchecked
                                 checks["SN"][j] = False
                                 save_task_for_user(st.session_state.user_id, task, checks, key=key_fk)
                                 st.rerun()
@@ -885,13 +902,15 @@ if st.session_state.user_id:
                     if task.get("LAQ"):
                         st.markdown("**📄 Long Answer Questions**")
                         for j, t in enumerate(task["LAQ"]):
-                            if st.checkbox(t, key=f"laq_{key_fk}_{j}", value=checks["LAQ"][j]):
-                                if not checks["LAQ"][j]:
+                            # Check if the index exists in checks["LAQ"] to prevent IndexError
+                            current_check_status = checks["LAQ"][j] if j < len(checks.get("LAQ", [])) else False
+                            if st.checkbox(t, key=f"laq_{key_fk}_{j}", value=current_check_status):
+                                if not current_check_status: # Only save if status changed to checked
                                     checks["LAQ"][j] = True
                                     save_task_for_user(st.session_state.user_id, task, checks, key=key_fk)
                                     st.session_state.play_tick_sound = True
                                     st.rerun()
-                            elif checks["LAQ"][j]:
+                            elif current_check_status: # Only save if status changed to unchecked
                                 checks["LAQ"][j] = False
                                 save_task_for_user(st.session_state.user_id, task, checks, key=key_fk)
                                 st.rerun()
@@ -918,7 +937,7 @@ if st.session_state.user_id:
                                 st.cache_data.clear()
                                 st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, new_subjects = load_tasks_for_user(st.session_state.user_id)
                                 st.session_state.all_subjects.update(new_subjects)
-                                st.success("Task restored successfully!", icon="✅")
+                                st.success("Task deleted successfully!", icon="✅") # Changed message
                                 st.session_state[f"show_confirm_{key_fk}"] = False
                                 st.rerun()
                             else: st.error(f"Failed to delete '{task['Chapter']}'. Please try again.", icon="❌")
@@ -952,9 +971,13 @@ if st.session_state.user_id:
             if task.get("Subject") == st.session_state.selected_view_subject:
                 checks = st.session_state.task_checks[i]
                 for j, t in enumerate(task.get("SN",[])):
-                    rows.append([task["Subject"],task["Chapter"],"SN",t,task["Priority"],task["Deadline"], "Done" if checks["SN"][j] else "Pending"])
+                    # Ensure checks index exists
+                    sn_status = "Done" if j < len(checks.get("SN", [])) and checks["SN"][j] else "Pending"
+                    rows.append([task["Subject"],task["Chapter"],"SN",t,task["Priority"],task["Deadline"], sn_status])
                 for j, t in enumerate(task.get("LAQ",[])):
-                    rows.append([task["Subject"],task["Chapter"],"LAQ",t,task["Priority"],task["Deadline"], "Done" if checks["LAQ"][j] else "Pending"])
+                    # Ensure checks index exists
+                    laq_status = "Done" if j < len(checks.get("LAQ", [])) and checks["LAQ"][j] else "Pending"
+                    rows.append([task["Subject"],task["Chapter"],"LAQ",t,task["Priority"],task["Deadline"], laq_status])
         if rows:
             df = pd.DataFrame(rows, columns=["Subject","Chapter","Type","Task","Priority","Deadline", "Status"])
             csv = df.to_csv(index=False).encode()
@@ -966,15 +989,14 @@ if st.session_state.user_id:
     if st.session_state.auth_status == "logged_in":
         st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
         if st.sidebar.button("Log Out"):
-            # Send message to JS component to trigger logout
-            js_code = """
-            <script>
-                window.signOutUser();
-            </script>
-            """
-            components.html(js_code, height=0)
-            # st.session_state.auth_status = "pending" # Will be set by JS callback
-            # st.rerun() # Will be triggered by JS callback
+            # This will call the JavaScript signOutUser function which then
+            # sends a message back to Streamlit, triggering the st.rerun above.
+            js_code = "<script>window.signOutUser();</script>"
+            # Use a unique key for this one-off component to avoid conflicts
+            components.html(js_code, height=0, width=0, key="logout_js_trigger")
+            # Set to pending immediately to show processing, JS will confirm logout
+            st.session_state.auth_status = "pending"
+            st.rerun()
 
         st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
 
@@ -994,48 +1016,12 @@ if st.session_state.user_id:
 
     elif st.session_state.auth_status == "logged_out":
         st.warning("Please log in to use the Study Tracker.")
-        # Render the auth component to show the login button
-        auth_return_value = firebase_auth_component()
-        if auth_return_value: # If the component sent a message back
-            if auth_return_value.get("type") == "auth_success":
-                st.session_state.user_id = auth_return_value["data"]["uid"]
-                st.session_state.user_email = auth_return_value["data"]["email"]
-                st.session_state.auth_status = "logged_in"
-                st.rerun()
-            elif auth_return_value.get("type") == "auth_signed_out":
-                st.session_state.auth_status = "logged_out" # Already logged out, but good for clarity
-                st.session_state.user_id = None
-                st.session_state.user_email = None
-                st.rerun()
-            elif auth_return_value.get("type") == "auth_error":
-                st.error(f"Authentication Error: {auth_return_value['data']}", icon="❌")
-                st.session_state.auth_status = "logged_out"
-                st.rerun()
+        # The authentication component is already rendered at the top of the file
+        # so no need to call firebase_auth_component() again here.
+        # The JS in the component will display the sign-in button.
 
     else: # auth_status == "pending"
         st.info("Checking authentication status...")
-        # The key is crucial to ensure Streamlit knows to receive data from this specific component
-        auth_return_value = firebase_auth_component() # This is where the JS sends data back
+        # The authentication component is already rendered at the top of the file.
+        # We are just waiting for its callback.
 
-        if auth_return_value: # If the component sent a message back
-            if auth_return_value.get("type") == "auth_success":
-                st.session_state.user_id = auth_return_value["data"]["uid"]
-                st.session_state.user_email = auth_return_value["data"]["email"]
-                st.session_state.auth_status = "logged_in"
-                st.rerun() # Re-run to update UI to logged-in state
-            elif auth_return_value.get("type") == "auth_failure":
-                st.session_state.auth_status = "logged_out"
-                st.session_state.user_id = None
-                st.session_state.user_email = None
-                st.rerun()
-            elif auth_return_value.get("type") == "auth_error":
-                st.session_state.auth_status = "logged_out"
-                st.session_state.user_id = None
-                st.session_state.user_email = None
-                st.error(f"Authentication Error: {auth_return_value['data']}", icon="❌")
-                st.rerun()
-            elif auth_return_value.get("type") == "auth_signed_out":
-                st.session_state.auth_status = "logged_out"
-                st.session_state.user_id = None
-                st.session_state.user_email = None
-                st.rerun()
