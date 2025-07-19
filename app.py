@@ -203,103 +203,24 @@ def firebase_auth_component():
 
 # --- Streamlit Message Listener (to get data from JavaScript component) ---
 # This block now uses the return value of components.html directly.
-auth_component_value = None
-if st.session_state.auth_status == "pending":
-    auth_component_value = firebase_auth_component() # Render and get return value
+# auth_component_value = None # This line is no longer needed at the top level
 
-    if auth_component_value: # If the component sent a message back
-        if auth_component_value.get("type") == "auth_success":
-            st.session_state.user_id = auth_component_value["data"]["uid"]
-            st.session_state.user_email = auth_component_value["data"]["email"]
-            st.session_state.auth_status = "logged_in"
-            st.rerun() # Re-run to update UI to logged-in state
-        elif auth_component_value.get("type") == "auth_failure":
-            st.session_state.auth_status = "logged_out"
-            st.session_state.user_id = None
-            st.session_state.user_email = None
-            st.rerun()
-        elif auth_component_value.get("type") == "auth_error":
-            st.session_state.auth_status = "logged_out"
-            st.session_state.user_id = None
-            st.session_state.user_email = None
-            st.error(f"Authentication Error: {auth_component_value['data']}", icon="❌")
-            st.rerun()
-        elif auth_component_value.get("type") == "auth_signed_out":
-            st.session_state.auth_status = "logged_out"
-            st.session_state.user_id = None
-            st.session_state.user_email = None
-            st.rerun()
+if st.session_state.auth_status == "logged_in":
+    st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
+    if st.sidebar.button("Log Out"):
+        # Send message to JS component to trigger logout
+        js_code = """
+        <script>
+            window.signOutUser();
+        </script>
+        """
+        components.html(js_code, height=0)
+        # st.session_state.auth_status will be updated by JS callback
 
-# --- Functions to interact with Firebase Realtime Database (USER SPECIFIC) ---
-@st.cache_data(ttl=300, show_spinner="Loading your study tasks...")
-def load_tasks_for_user(user_id):
-    if not user_id:
-        return [], [], [], set()
-    try:
-        ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
-        data = ref.get()
-        if not data:
-            return [], [], [], set()
+    st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
 
-        tasks_list = []
-        checks_list = []
-        keys_list = []
-        subjects_set = set()
-
-        for key, value in data.items():
-            task = value.get("task", {})
-            check = value.get("check", {})
-            tasks_list.append(task)
-            checks_list.append(check)
-            keys_list.append(key)
-            if "Subject" in task:
-                subjects_set.add(task["Subject"])
-
-        return tasks_list, checks_list, keys_list, subjects_set
-    except Exception as e:
-        st.error(f"Error loading tasks from Firebase: {e}", icon="❌")
-        return [], [], [], set()
-
-def save_task_for_user(user_id, task, check, key=None):
-    if not user_id:
-        st.warning("Cannot save task: No user logged in.")
-        return None
-    try:
-        ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
-        if not key:
-            key = str(uuid.uuid4())
-        ref.child(key).set({"task": task, "check": check})
-        return key
-    except Exception as e:
-        st.error(f"Error saving task to Firebase: {e}", icon="❌")
-        return None
-
-def delete_task_from_db_for_user(user_id, key):
-    if not user_id:
-        st.warning("Cannot delete task: No user logged in.")
-        return False
-    try:
-        db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks").child(key).delete()
-        return True
-    except Exception as e:
-        st.error(f"Error deleting task from Firebase: {e}", icon="❌")
-        return False
-
-# --- AUDIO PLAYBACK FUNCTION ---
-def play_sound(sound_url: str, unique_key: str):
-    """Embeds an HTML audio player that plays automatically."""
-    audio_html = f"""
-    <audio autoplay style="display:none;" key="{unique_key}">
-      <source src="{sound_url}" type="audio/mpeg">
-      Your browser does not support the audio element.
-    </audio>
-    """
-    components.html(audio_html, height=0)
-
-
-# --- SESSION STATE INITIALIZATION for APP DATA (depends on user_id) ---
-# This block now runs ONLY if the user is logged in
-if st.session_state.user_id:
+    # --- SESSION STATE INITIALIZATION for APP DATA (depends on user_id) ---
+    # Moved this block inside 'logged_in' check to ensure user_id is set
     if "tasks" not in st.session_state:
         st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, loaded_subjects = load_tasks_for_user(st.session_state.user_id)
         st.session_state.all_subjects = loaded_subjects
@@ -971,72 +892,47 @@ if st.session_state.user_id:
         else: st.info("No tasks to export for the selected subject.")
 
 
-    # --- MAIN APP LAYOUT (Conditional based on Authentication) ---
-    if st.session_state.auth_status == "logged_in":
-        st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
-        if st.sidebar.button("Log Out"):
-            # Send message to JS component to trigger logout
-            js_code = """
-            <script>
-                window.signOutUser();
-            </script>
-            """
-            components.html(js_code, height=0)
-            # st.session_state.auth_status = "pending" # Will be set by JS callback
-            # st.rerun() # Will be triggered by JS callback
+elif st.session_state.auth_status == "logged_out":
+    st.warning("Please log in to use the Study Tracker.")
+    if st.button("Sign in with Google"):
+        # Send message to JS component to trigger login
+        js_code = """
+        <script>
+            window.signInWithGoogle();
+        </script>
+        """
+        components.html(js_code, height=0)
+        # st.session_state.auth_status will be updated by JS callback
 
-        st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
+else: # auth_status == "pending"
+    st.info("Checking authentication status...")
+    # This is where the JS sends data back.
+    auth_return_value = firebase_auth_component()
 
-        add_task_form()
-        st.sidebar.divider()
-        undo_delete_section()
-
-        filter_and_search_options()
-        pomodoro_timer_section()
-        st.divider()
-        subject_filter_section()
-        completion_overview_section()
-        st.divider()
-        task_list_section()
-        st.divider()
-        export_csv_section()
-
-    elif st.session_state.auth_status == "logged_out":
-        st.warning("Please log in to use the Study Tracker.")
-        if st.button("Sign in with Google"):
-            # Send message to JS component to trigger login
-            js_code = """
-            <script>
-                window.signInWithGoogle();
-            </script>
-            """
-            components.html(js_code, height=0)
-            # st.session_state.auth_status will be updated by JS callback
-
-    else: # auth_status == "pending"
-        st.info("Checking authentication status...")
-        # The key is crucial to ensure Streamlit knows to receive data from this specific component
-        auth_return_value = firebase_auth_component() # Render and get return value
-
-        if auth_return_value: # If the component sent a message back
-            if auth_return_value.get("type") == "auth_success":
-                st.session_state.user_id = auth_return_value["data"]["uid"]
-                st.session_state.user_email = auth_return_value["data"]["email"]
-                st.session_state.auth_status = "logged_in"
-                st.rerun() # Re-run to update UI to logged-in state
-            elif auth_return_value.get("type") == "auth_failure":
-                st.session_state.auth_status = "logged_out"
-                st.session_state.user_id = None
-                st.session_state.user_email = None
-                st.rerun()
-            elif auth_return_value.get("type") == "auth_error":
-                st.session_state.auth_status = "logged_out"
-                st.session_state.user_id = None
-                st.session_state.user_email = None
-                st.error(f"Authentication Error: {auth_return_value['data']}", icon="❌")
-                st.rerun()
-            elif auth_return_value.get("type") == "auth_signed_out":
-                st.session_state.auth_status = "logged_out"
-                st.session_state.user_id = None
-                st.session_state.user_email = None
-                st.rerun()
+    # FIX: Add a robust check to ensure auth_return_value is a dictionary
+    # and contains 'type' before trying to access it. 
+    if isinstance(auth_return_value, dict) and "type" in auth_return_value:
+        if auth_return_value.get("type") == "auth_success":
+            st.session_state.user_id = auth_return_value["data"]["uid"]
+            st.session_state.user_email = auth_return_value["data"]["email"]
+            st.session_state.auth_status = "logged_in"
+            st.rerun() # Re-run to update UI to logged-in state
+        elif auth_return_value.get("type") == "auth_failure":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.rerun()
+        elif auth_return_value.get("type") == "auth_error":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.error(f"Authentication Error: {auth_return_value['data']}", icon="❌")
+            st.rerun()
+        elif auth_return_value.get("type") == "auth_signed_out":
+            st.session_state.auth_status = "logged_out"
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.rerun()
+    # No `else` needed here if auth_return_value is not a dict or missing 'type',
+    # as `st.session_state.auth_status` will remain "pending" and the loop continues
+    # until a valid authentication message is received.
