@@ -1,6 +1,6 @@
 import streamlit as st
 import firebase_admin
-from firebase_admin import credentials, db # Removed auth as it's for user management
+from firebase_admin import credentials, db, auth # Import auth for user management (optional for this simple example)
 from datetime import date
 import uuid
 import pandas as pd
@@ -9,7 +9,9 @@ import time
 import streamlit.components.v1 as components
 
 # --- CONFIGURATION (using Streamlit Secrets) ---
-DB_PATH_ROOT = "users" # New root path for user-specific data
+# DB_PATH_ROOT now uses a fixed ID for data access
+# You might want to change this to a generic ID or remove user-specific paths entirely if data is shared.
+DB_PATH_ROOT = "public_users" # Changed to a generic path for non-authenticated access
 
 # --- AUDIO ASSETS (URLs) ---
 POMODORO_FINISH_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
@@ -17,7 +19,7 @@ TASK_TICK_SOUND_URL = "https://www.soundjay.com/buttons/sounds/button-48.mp3"
 WHITE_NOISE_URL = "https://www.soundjay.com/nature/sounds/whitenoise-1.mp3"
 
 
-# --- FIREBASE ADMIN SDK INITIALIZATION (For server-side operations if needed) ---
+# --- FIREBASE ADMIN SDK INITIALIZATION (For server-side operations) ---
 # @st.cache_resource ensures this function runs only once across reruns.
 @st.cache_resource(show_spinner="Initializing Firebase Admin SDK...")
 def initialize_firebase_admin_sdk():
@@ -36,6 +38,7 @@ def initialize_firebase_admin_sdk():
 
     if not firebase_admin._apps:
         try:
+            # Replace escaped newlines in private_key
             firebase_private_key = firebase_config["private_key"].replace('\\n', '\n')
 
             firebase_creds = {
@@ -66,25 +69,21 @@ def initialize_firebase_admin_sdk():
 initialize_firebase_admin_sdk()
 
 
-# --- Removed CLIENT-SIDE FIREBASE SDK CONFIG and related components ---
-# FIREBASE_CLIENT_CONFIG and firebase_auth_component are no longer needed
-# if Google login is removed.
-
-
-# --- SESSION STATE INITIALIZATION for "Authentication" (Simplified) ---
-# We'll use a default user ID since there's no login.
+# --- SESSION STATE INITIALIZATION FOR AUTHENTICATION (SIMPLIFIED) ---
+# Hardcode user details as no authentication is performed
 if "user_id" not in st.session_state:
-    st.session_state.user_id = "default_user_id" # Assign a default ID
+    st.session_state.user_id = "default_user_id" # A fixed ID for non-authenticated access
 if "user_email" not in st.session_state:
-    st.session_state.user_email = "default@example.com" # Assign a default email or remove if not displayed
-# Removed auth_status as it's no longer relevant for authentication flow
+    st.session_state.user_email = "guest@example.com" # A dummy email
+if "auth_status" not in st.session_state:
+    st.session_state.auth_status = "logged_in" # Always logged in
 
 
 # --- Functions to interact with Firebase Realtime Database (USER SPECIFIC) ---
+# Now using DB_PATH_ROOT which is set to "public_users"
 @st.cache_data(ttl=300, show_spinner="Loading your study tasks...")
 def load_tasks_for_user(user_id):
-    if not user_id:
-        return [], [], [], set()
+    # user_id will now always be "default_user_id"
     try:
         ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
         data = ref.get()
@@ -111,9 +110,7 @@ def load_tasks_for_user(user_id):
         return [], [], [], set()
 
 def save_task_for_user(user_id, task, check, key=None):
-    if not user_id:
-        st.warning("Cannot save task: No user logged in.")
-        return None
+    # user_id will now always be "default_user_id"
     try:
         ref = db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks")
         if not key:
@@ -125,9 +122,7 @@ def save_task_for_user(user_id, task, check, key=None):
         return None
 
 def delete_task_from_db_for_user(user_id, key):
-    if not user_id:
-        st.warning("Cannot delete task: No user logged in.")
-        return False
+    # user_id will now always be "default_user_id"
     try:
         db.reference(f"{DB_PATH_ROOT}/{user_id}/tasks").child(key).delete()
         return True
@@ -147,8 +142,8 @@ def play_sound(sound_url: str, unique_key: str):
     components.html(audio_html, height=0)
 
 
-# --- SESSION STATE INITIALIZATION for APP DATA (depends on user_id) ---
-# This block now runs always as user_id is defaulted
+# --- SESSION STATE INITIALIZATION for APP DATA (now always runs) ---
+# Removed the `if st.session_state.user_id:` check as user is always "logged in"
 if "tasks" not in st.session_state:
     st.session_state.tasks, st.session_state.task_checks, st.session_state.task_keys, loaded_subjects = load_tasks_for_user(st.session_state.user_id)
     st.session_state.all_subjects = loaded_subjects
@@ -820,11 +815,12 @@ def export_csv_section():
     else: st.info("No tasks to export for the selected subject.")
 
 
-# --- MAIN APP LAYOUT (Always show the app content) ---
+# --- MAIN APP LAYOUT (Always "logged in" now) ---
 st.sidebar.markdown(f"**Logged in as:** {st.session_state.user_email}")
-# Removed Log Out button and related logic
+# Removed Log Out button as there's no login
+# if st.sidebar.button("Log Out"): ...
 
-st.success(f"Welcome to Study Tracker!", icon="👋") # Simplified welcome message
+st.success(f"Welcome, {st.session_state.user_email}!", icon="👋")
 
 add_task_form()
 st.sidebar.divider()
@@ -840,4 +836,4 @@ task_list_section()
 st.divider()
 export_csv_section()
 
-# Removed all auth_status conditional blocks
+# Removed the entire conditional block for auth_status == "logged_out" and "pending"
