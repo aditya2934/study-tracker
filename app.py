@@ -85,8 +85,10 @@ if "user_email" not in st.session_state:
     st.session_state.user_email = None
 if "auth_status" not in st.session_state:
     st.session_state.auth_status = "pending" # pending, logged_in, logged_out
-if "auth_component_initialized" not in st.session_state:
-    st.session_state.auth_component_initialized = False # Flag to ensure initial processing runs once
+# New state variable to track the last data received from the auth component
+if "last_auth_component_data" not in st.session_state:
+    st.session_state.last_auth_component_data = None
+
 
 # --- Streamlit Components for Authentication (using custom HTML/JS) ---
 # This component handles the actual Firebase client-side authentication flow.
@@ -123,16 +125,22 @@ def firebase_auth_component():
                     // Update UI for logged-in state
                     if (signInButton) signInButton.style.display = 'none';
                     if (signOutButton) signOutButton.style.display = 'block';
-                    sendAuthStatusToStreamlit('auth_success', {{
-                        uid: user.uid,
-                        email: user.email,
-                        displayName: user.displayName
-                    }});
+                    // Add a small delay before sending to Streamlit
+                    setTimeout(() => {{
+                        sendAuthStatusToStreamlit('auth_success', {{
+                            uid: user.uid,
+                            email: user.email,
+                            displayName: user.displayName
+                        }});
+                    }}, 50); // Small delay
                 }} else {{
                     // Update UI for logged-out state
                     if (signInButton) signInButton.style.display = 'block';
                     if (signOutButton) signOutButton.style.display = 'none';
-                    sendAuthStatusToStreamlit('auth_failure', null);
+                    // Add a small delay before sending to Streamlit
+                    setTimeout(() => {{
+                        sendAuthStatusToStreamlit('auth_failure', null);
+                    }}, 50); // Small delay
                 }}
             }});
 
@@ -155,20 +163,12 @@ def firebase_auth_component():
                     }});
             }};
 
-            // This is crucial: Send an initial state after the component is ready
-            // and Firebase has had a chance to check auth state.
+            // This is crucial: Signal that the component is ready.
+            // onAuthStateChanged will handle sending the initial state.
             document.addEventListener('DOMContentLoaded', function() {{
                 setTimeout(() => {{
                     if (window.Streamlit) {{
                         Streamlit.setComponentReady();
-                        // Send current auth state immediately after component is ready
-                        // This ensures Streamlit receives the initial state even if onAuthStateChanged
-                        // fires before Streamlit is ready to receive.
-                        if (auth.currentUser) {{
-                            sendAuthStatusToStreamlit('auth_success', {{ uid: auth.currentUser.uid, email: auth.currentUser.email, displayName: auth.currentUser.displayName }});
-                        }} else {{
-                            sendAuthStatusToStreamlit('auth_failure', null);
-                        }}
                     }}
                 }}, 100); // Small delay
             }});
@@ -209,42 +209,16 @@ def firebase_auth_component():
 auth_component_value = firebase_auth_component()
 
 # --- Process authentication messages from the component ---
-# This block handles the initial setup of auth_status based on the component's first message.
-if not st.session_state.auth_component_initialized and auth_component_value:
-    if auth_component_value.get("type") == "auth_success":
-        st.session_state.user_id = auth_component_value["data"]["uid"]
-        st.session_state.user_email = auth_component_value["data"]["email"]
-        st.session_state.auth_status = "logged_in"
-        st.session_state.auth_component_initialized = True
-        st.rerun() # Rerun to update UI based on logged-in state
-    elif auth_component_value.get("type") == "auth_failure":
-        st.session_state.auth_status = "logged_out"
-        st.session_state.user_id = None
-        st.session_state.user_email = None
-        st.session_state.auth_component_initialized = True
-        st.rerun() # Rerun to update UI based on logged-out state
-    elif auth_component_value.get("type") == "auth_error":
-        st.session_state.auth_status = "logged_out"
-        st.session_state.user_id = None
-        st.session_state.user_email = None
-        st.error(f"Authentication Error: {auth_component_value['data']}", icon="❌")
-        st.session_state.auth_component_initialized = True
-        st.rerun()
-    elif auth_component_value.get("type") == "auth_signed_out":
-        st.session_state.auth_status = "logged_out"
-        st.session_state.user_id = None
-        st.session_state.user_email = None
-        st.session_state.auth_component_initialized = True
-        st.rerun()
+# Only process if new data is received AND it's different from the last processed data
+if auth_component_value and auth_component_value != st.session_state.last_auth_component_data:
+    st.session_state.last_auth_component_data = auth_component_value # Store the new data
 
-# --- Handle subsequent state changes from the component after initial setup ---
-# This block will process updates from the component after the initial state is set.
-# It only triggers a rerun if the status genuinely changes to avoid infinite loops.
-if st.session_state.auth_component_initialized and auth_component_value:
     if auth_component_value.get("type") == "auth_success":
-        if st.session_state.user_id != auth_component_value["data"]["uid"] or st.session_state.auth_status != "logged_in":
-            st.session_state.user_id = auth_component_value["data"]["uid"]
-            st.session_state.user_email = auth_component_value["data"]["email"]
+        new_user_id = auth_component_value["data"]["uid"]
+        new_user_email = auth_component_value["data"]["email"]
+        if st.session_state.auth_status != "logged_in" or st.session_state.user_id != new_user_id:
+            st.session_state.user_id = new_user_id
+            st.session_state.user_email = new_user_email
             st.session_state.auth_status = "logged_in"
             st.rerun()
     elif auth_component_value.get("type") == "auth_failure":
