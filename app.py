@@ -197,9 +197,8 @@ def firebase_auth_component():
     </body>
     </html>
     """
-    # The return value of components.html is the data sent back via Streamlit.setComponentValue
-    # We set a key to ensure it re-renders.
-    return components.html(html_code, height=100, scrolling=False, key="firebase_auth_ui_component")
+    # FIX: Removed the 'key' argument as it's not supported by components.html
+    return components.html(html_code, height=100, scrolling=False)
 
 
 # --- Streamlit Message Listener (to get data from JavaScript component) ---
@@ -791,7 +790,7 @@ if st.session_state.user_id:
                 if not edited_chapter.strip():
                     st.error("Chapter cannot be empty.", icon="❌")
                 elif not new_sn_list and not new_laq_list:
-                    st.error("At least one Short Note or Long Answer Question is required.", icon="❌")
+                    st.warning("At least one Short Note or Long Answer Question is required.", icon="❌")
                 else:
                     new_checks_sn = [False] * len(new_sn_list)
                     for i, sn_item in enumerate(new_sn_list):
@@ -1017,7 +1016,7 @@ if st.session_state.user_id:
     else: # auth_status == "pending"
         st.info("Checking authentication status...")
         # The key is crucial to ensure Streamlit knows to receive data from this specific component
-        auth_return_value = firebase_auth_component() # This is where the JS sends data back
+        auth_return_value = firebase_auth_component() # Render and get return value
 
         if auth_return_value: # If the component sent a message back
             if auth_return_value.get("type") == "auth_success":
